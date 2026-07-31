@@ -1,0 +1,23 @@
+(GUARA - caso sintetico 2: duas linhas paralelas acopladas em 100% do trecho
+(valida a matriz primitiva de grupo e a identidade de segmento por circuito
+DBAR
+    1    FONTE-138             138.0
+    2    REMOTA-138            138.0
+99999
+DCIR
+    0      1   1G  0.00 10.00  0.00 10.00UG1                                                  YN
+    1      2   1L  0.00 20.00  0.00 60.00LT1
+    1      2   2L  0.00 20.00  0.00 60.00LT2
+99999
+DMUT
+(Bf1 Bt1    N1 Bf2  Bt2    N2  RM    XM     %I1   %F1   %I2   %F2
+    1      2   1    1      2   2  0.00 20.00   0.00100.00  0.00100.00
+99999
+DMOV
+99999
+DSHL
+99999
+DEOL
+99999
+DARE
+99999

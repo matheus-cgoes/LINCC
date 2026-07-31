@@ -1,0 +1,24 @@
+(GUARA - caso sintetico 1: radial basico - 3 barras
+(gerador aterrado, linha, trafo YN-D. Resultado deduzido analiticamente em ESPERADO.md
+DBAR
+(No   O Nome         Grupo  Grupo   VBase
+    1    GER-138               138.0
+    2    CARGA-138             138.0
+    3    BT-13.8                13.8
+99999
+DCIR
+(De  E Para   NcT R1    X1    R0    X0    Nome  S1   S0
+    0      1   1G  0.00 10.00  0.00  5.00UG1                                                  YN
+    1      2   1L  0.00 10.00  0.00 30.00LT1
+    2      3   1T  0.00  8.00  0.00  8.00TR1                                    YN            D
+99999
+DMUT
+99999
+DMOV
+99999
+DSHL
+99999
+DEOL
+99999
+DARE
+99999

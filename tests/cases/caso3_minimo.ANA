@@ -1,0 +1,10 @@
+(LINCC - caso sintetico 3: minimo, SEM blocos opcionais (sem DMUT/DMOV/DSHL/DEOL/DARE)
+(valida robustez do parser a casos que nao declaram todos os blocos
+DBAR
+    1    FONTE-230             230.0
+    2    CARGA-230             230.0
+99999
+DCIR
+    0      1   1G  0.00 12.50  0.00 12.50UG1                                                  YN
+    1      2   1L  0.00 25.00  0.00 75.00LT1
+99999
