@@ -162,48 +162,98 @@ docs/             formato-ana.md  mutuas.md  validacao.md
 
 ## Uso
 
-### Inicialização em agentes de IA
-Incluir arquivos lincc_bundle.py, caso .ANA e os relatórios de níveis e dados de curto-circuito anexados ao prompt. Abaixo prompt de referência:
+## Uso com agentes de IA
+
+O LINCC foi feito para ser operado por conversa: você anexa o motor e o caso, descreve o estudo em
+português, e o agente escreve o código que chama a API. Nada é calculado pelo modelo de linguagem —
+todo número sai do motor.
+
+### O que anexar
+
+| Arquivo | Quando |
+|---|---|
+| `lincc_bundle.py` | sempre — é o motor inteiro em um arquivo, sem instalação |
+| `CASO.ANA` | sempre |
+| Relatório do ANAFAS | só para validar um caso ainda não validado | Importar Relatórios de Níveis de Curto-circuito, dados de curto-circuito e impedâncias de barra.
+
+Gere o `lincc_bundle.py` com `python ferramentas/gerar_bundle.py`, ou baixe-o dos releases.
+
+### Prompt para usar
+
+Para análise em caso já validado. É o uso normal.
 
 ```
-Anexei o lincc_bundle.py (motor de curto-circuito validado), o caso .ANA e o relatório da ferramenta
-de referência para o mesmo caso.
+Anexei o lincc_bundle.py (motor de curto-circuito) e um caso .ANA.
 
-O motor é a FONTE DE VERDADE: não o recrie de memória. Meta: erro INDIVIDUAL por barra < 1% em Z1 e
-Z0 — não erro médio, não faixa de 5%.
+O motor é a fonte de verdade: importe e use, não recrie de memória, não reescreva a modelagem.
 
-Passos, nesta ordem:
+    import sys; sys.path.insert(0, '.')
+    from lincc_bundle import AnaModel, Solver, branches_at, recomposicao_87b
+    M = AnaModel("CASO.ANA");  S = Solver(M);  S.factor()
+
+Correntes saem em kA primários. Consulte as docstrings para a API completa e para os limites de
+cada método.
+
+Duas regras de cálculo:
+- S.fault() é Thévenin puro e NÃO inclui geradores conectados por conversor (eólicos e
+  fotovoltaicos, registros DEOL). Para nível de curto destinado a dimensionamento de equipamento
+  ou ajuste de proteção, use S.fault_fc(), que os inclui. Perto dessas usinas a diferença passa
+  de 40%.
+- Elos HVDC back-to-back são bloqueados: não há caminho de curto entre os dois lados da
+  conversora. Isso é modelagem, não omissão.
+
+Se faltar dado (relação de TC, ajuste de IED, placa de equipamento, capacidade de interrupção),
+diga o que falta em vez de estimar.
+
+O que eu preciso: <descreva o estudo>
+```
+
+### Prompt para validar um caso novo
+
+Todo caso que você ainda não conferiu passa por aqui antes de virar estudo. O parser lê o formato,
+não um caso específico — mas um tipo de registro que não apareça no caso de referência é ignorado
+em silêncio, e o número sai errado sem nenhum aviso.
+
+```
+Anexei o lincc_bundle.py, um caso .ANA e o relatório do ANAFAS para o MESMO caso.
+
+Valide o motor contra o relatório, barra a barra. Critério: erro INDIVIDUAL por barra abaixo de 1%
+em Z1 e Z0 — não erro médio, não faixa de 5%.
+
 1. Rode o motor sobre o .ANA e fatore.
-2. Extraia o gabarito da seção 'RELATORIO DE DADOS DE CURTO-CIRCUITO' do relatório, ANCORANDO na
-   seção (começa no cabeçalho, termina no próximo 'RELATORIO DE'). Régua 0-based da linha de dados:
-   NUM[1:7], Z1MOD[21:29], Z1ANG[30:38], Z0MOD[39:47], Z0ANG[48:56].
-   Sem a âncora, linhas das seções de matriz Zbarra casam com o mesmo padrão e contaminam o gabarito.
-3. Compare POR BARRA. Reporte %<1%, %<5%, mediana e estratificação por classe de tensão
-   (500+, 230-345, 69-138, <69, kV=0).
-4. Só então investigue as barras acima de 1%, uma a uma, pelo método abaixo.
-5. Nas solicitações de cálculo de curto-circuito, sempre insira as contribuições de fontes conectadas por conversor (UFV, EOL, HVDC).
+2. Extraia o gabarito do relatório. Meça as colunas no próprio arquivo antes de confiar em
+   qualquer régua: cada seção tem a sua. Duas armadilhas conhecidas:
+   - o cabeçalho do relatório de níveis é ACENTUADO ("RELATÓRIO DE NÍVEIS"); delimitar seção
+     procurando só por "RELATORIO" faz a leitura atravessar para dentro dele;
+   - valor mais largo que a coluna invade o campo anterior, e a leitura por coluna fixa perde o
+     dígito inicial. Utilize sempre a seção de alta precisão, quando disponível. 
+3. Compare por barra. Reporte %<1%, %<5%, mediana e estratificação por classe de tensão.
+4. Só então investigue as barras acima de 1%, uma a uma: localize o elemento por
+   I_terra = rowsum(Y0)·V, confirme no registro cru do .ANA, e valide qualquer correção medindo o
+   %<1% sobre TODA a rede — nunca sobre a barra alvo.
 
-Não declare sucesso antes de bater contra o gabarito deste caso.
-Anexei o lincc_bundle.py (motor de curto-circuito validado), o caso .ANA e o relatório da ferramenta
-de referência para o mesmo caso.
+Compare cada grandeza com a seção certa:
+- Z1 e Z0            → "RELATORIO DE IMPEDANCIAS DE BARRA" (10 decimais). É o gabarito de verdade.
+- S.fault (kA)       → "RELATORIO DE DADOS DE CURTO-CIRCUITO" (MVA), que exclui os conversores.
+- S.fault_fc (kA)    → "RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO" (kA), que os inclui.
+Comparar fault() com a seção de níveis reprova função correta.
 
-O motor é a FONTE DE VERDADE: não o recrie de memória. Meta: erro INDIVIDUAL por barra < 1% em Z1 e
-Z0 — não erro médio.
-
-Passos, nesta ordem:
-1. Rode o motor sobre o .ANA e fatore.
-2. Extraia o gabarito da seção 'RELATORIO DE DADOS DE CURTO-CIRCUITO' do relatório, ANCORANDO na
-   seção (começa no cabeçalho, termina no próximo 'RELATORIO DE'). Régua 0-based da linha de dados:
-   NUM[1:7], Z1MOD[21:29], Z1ANG[30:38], Z0MOD[39:47], Z0ANG[48:56].
-   Sem a âncora, linhas das seções de matriz Zbarra casam com o mesmo padrão e contaminam o gabarito.
-3. Compare POR BARRA. Reporte %<1%, %<5%, mediana e estratificação por classe de tensão
-   (500+, 230-345, 69-138, <69, kV=0).
-4. Só então investigue as barras acima de 1%, uma a uma, pelo método abaixo.
+A seção de dados tem 4 decimais em pu: sobre impedância pequena, o arredondamento sozinho produz
+erro relativo aparente acima de 1%. Julgue pela seção de alta precisão.
 
 Não declare sucesso antes de bater contra o gabarito deste caso.
 ```
-Após essa inicialização, o chat estará pronto para solicitações.
-Complementação adicional pode ser fornecida, por exemplo, introdução de aplicação para a qual será utilizado.
+
+Se preferir não depender do agente para isso, o repositório traz o mesmo procedimento pronto:
+
+```bash
+python examples/validar_caso.py CASO.ANA RELATORIO.LST
+```
+
+### Depois da inicialização
+
+O chat fica pronto para pedidos em linguagem natural.
+Descrever a aplicação e o critério do seu estudo melhora bastante o resultado.
 
 ### Grandezas básicas
 
