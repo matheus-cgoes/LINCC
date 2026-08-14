@@ -174,7 +174,9 @@ todo número sai do motor.
 |---|---|
 | `lincc_bundle.py` | sempre — é o motor inteiro em um arquivo, sem instalação |
 | `CASO.ANA` | sempre |
-| Relatório do ANAFAS | só para validar um caso ainda não validado | Importar Relatórios de Níveis de Curto-circuito, dados de curto-circuito e impedâncias de barra.
+| Relatório do ANAFAS | só para validar um caso ainda não validado | 
+
+* Relatório do ANAFAS: Importar Relatórios de Níveis de Curto-circuito, dados de curto-circuito e impedâncias de barra.
 
 Gere o `lincc_bundle.py` com `python ferramentas/gerar_bundle.py`, ou baixe-o dos releases.
 
