@@ -162,6 +162,49 @@ docs/             formato-ana.md  mutuas.md  validacao.md
 
 ## Uso
 
+### Inicialização em agentes de IA
+Incluir arquivos lincc_bundle.py, caso .ANA e os relatórios de níveis e dados de curto-circuito anexados ao prompt. Abaixo prompt de referência:
+
+```
+Anexei o lincc_bundle.py (motor de curto-circuito validado), o caso .ANA e o relatório da ferramenta
+de referência para o mesmo caso.
+
+O motor é a FONTE DE VERDADE: não o recrie de memória. Meta: erro INDIVIDUAL por barra < 1% em Z1 e
+Z0 — não erro médio, não faixa de 5%.
+
+Passos, nesta ordem:
+1. Rode o motor sobre o .ANA e fatore.
+2. Extraia o gabarito da seção 'RELATORIO DE DADOS DE CURTO-CIRCUITO' do relatório, ANCORANDO na
+   seção (começa no cabeçalho, termina no próximo 'RELATORIO DE'). Régua 0-based da linha de dados:
+   NUM[1:7], Z1MOD[21:29], Z1ANG[30:38], Z0MOD[39:47], Z0ANG[48:56].
+   Sem a âncora, linhas das seções de matriz Zbarra casam com o mesmo padrão e contaminam o gabarito.
+3. Compare POR BARRA. Reporte %<1%, %<5%, mediana e estratificação por classe de tensão
+   (500+, 230-345, 69-138, <69, kV=0).
+4. Só então investigue as barras acima de 1%, uma a uma, pelo método abaixo.
+5. Nas solicitações de cálculo de curto-circuito, sempre insira as contribuições de fontes conectadas por conversor (UFV, EOL, HVDC).
+
+Não declare sucesso antes de bater contra o gabarito deste caso.
+Anexei o lincc_bundle.py (motor de curto-circuito validado), o caso .ANA e o relatório da ferramenta
+de referência para o mesmo caso.
+
+O motor é a FONTE DE VERDADE: não o recrie de memória. Meta: erro INDIVIDUAL por barra < 1% em Z1 e
+Z0 — não erro médio, não faixa de 5%. 
+
+Passos, nesta ordem:
+1. Rode o motor sobre o .ANA e fatore.
+2. Extraia o gabarito da seção 'RELATORIO DE DADOS DE CURTO-CIRCUITO' do relatório, ANCORANDO na
+   seção (começa no cabeçalho, termina no próximo 'RELATORIO DE'). Régua 0-based da linha de dados:
+   NUM[1:7], Z1MOD[21:29], Z1ANG[30:38], Z0MOD[39:47], Z0ANG[48:56].
+   Sem a âncora, linhas das seções de matriz Zbarra casam com o mesmo padrão e contaminam o gabarito.
+3. Compare POR BARRA. Reporte %<1%, %<5%, mediana e estratificação por classe de tensão
+   (500+, 230-345, 69-138, <69, kV=0).
+4. Só então investigue as barras acima de 1%, uma a uma, pelo método abaixo.
+
+Não declare sucesso antes de bater contra o gabarito deste caso.
+```
+Após essa inicialização, o chat estará pronto para solicitações.
+Complementação adicional pode ser fornecida, por exemplo, introdução de aplicação para a qual será utilizado.
+
 ### Grandezas básicas
 
 ```python
