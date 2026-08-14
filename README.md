@@ -188,7 +188,7 @@ Anexei o lincc_bundle.py (motor de curto-circuito validado), o caso .ANA e o rel
 de referência para o mesmo caso.
 
 O motor é a FONTE DE VERDADE: não o recrie de memória. Meta: erro INDIVIDUAL por barra < 1% em Z1 e
-Z0 — não erro médio, não faixa de 5%. 
+Z0 — não erro médio.
 
 Passos, nesta ordem:
 1. Rode o motor sobre o .ANA e fatore.
