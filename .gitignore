@@ -1,0 +1,41 @@
+# dados de terceiros — NUNCA versionar
+*.ANA
+*.ana
+# exceção: casos SINTÉTICOS de teste, sem qualquer dado de terceiro
+!tests/cases/*.ANA
+*.LST
+*.lst
+*.pwf
+*.sav
+anafas*.txt
+relatorio*.txt
+casos_reais/
+dados_internos/
+
+# material privado: benchmark do caso real, prompts de trabalho, notas internas
+_privado/
+
+# bundle: e concatenacao do proprio pacote, gerado por ferramentas/gerar_bundle.py
+lincc_bundle.py
+
+# artefatos do motor
+*.pkl
+*_err.json
+saidas/
+outputs/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+
+# sistema / editor
+.DS_Store
+.idea/
+.vscode/

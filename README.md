@@ -20,11 +20,16 @@ planejamento, com critério de erro individual — não erro médio.
 
 ## Estado da validação
 
+Contra a seção de **alta precisão** do relatório (impedâncias de barra, 10 decimais):
+
 | Métrica (caso de referência, 15.627 barras) | Resultado |
 |---|---|
-| Sequência positiva, erro individual por barra < 1% | **99,4%** das barras (mediana 0,021%) |
-| Sequência zero, erro individual por barra < 1% | **98,8%** das barras (mediana 0,019%) |
-| Barras de 500 kV, contra seção de alta precisão do relatório | 100% < 1% em ambas as sequências |
+| Sequência positiva, erro individual por barra < 1% | **100,000%** das barras (mediana 0,0000%) |
+| Sequência zero, erro individual por barra < 1% | **99,992%** das barras (mediana 0,0000%) |
+| Níveis em MVA — trifásico e bifásico-terra | 100,000% < 1% |
+
+Medido contra a seção de 4 decimais em pu, o mesmo motor dá 99,4% e 98,8%: a diferença é quantização
+do relatório, não erro do solver. Sobre impedância pequena, o arredondamento sozinho já excede 1%.
 
 O critério de aceitação é **erro individual por barra**. A média geral baixa é fácil de obter e não
 serve: basta que a barra errada seja justamente a do vão em estudo.
@@ -134,7 +139,11 @@ python examples/validar_caso.py CASO.ANA RELATORIO.LST
 ```
 
 Compara barra a barra contra o relatório da ferramenta de referência para o mesmo caso e lista as barras
-acima do critério. Aceita `--limite`, `--piores` e `--secao`; retorna 0 se todas as barras passam.
+acima do critério. Aceita `--limite`, `--piores` e `--com-deol`; retorna 0 se todas as comparações
+decisivas passam.
+
+Documentação completa dos dois scripts — argumentos, quais relatórios exportar do ANAFAS e como
+interpretar o resultado: [`docs/scripts.md`](docs/scripts.md).
 
 ### `ferramentas/gerar_bundle.py` — versão de arquivo único
 
@@ -155,32 +164,41 @@ src/lincc/        _base.py  model.py  solver.py  __init__.py
 tests/            test_casos_sinteticos.py + cases/ (3 casos sintéticos + ESPERADO.md)
 examples/         validar_caso.py
 ferramentas/      gerar_bundle.py
-docs/             formato-ana.md  mutuas.md  validacao.md
+docs/             formato-ana.md  mutuas.md  validacao.md  scripts.md
 ```
 
 ---
 
 ## Uso
 
-## Uso com agentes de IA
+### Com agentes de IA
 
 O LINCC foi feito para ser operado por conversa: você anexa o motor e o caso, descreve o estudo em
 português, e o agente escreve o código que chama a API. Nada é calculado pelo modelo de linguagem —
 todo número sai do motor.
 
-### O que anexar
+#### O que anexar
 
 | Arquivo | Quando |
 |---|---|
 | `lincc_bundle.py` | sempre — é o motor inteiro em um arquivo, sem instalação |
 | `CASO.ANA` | sempre |
-| Relatório do ANAFAS | só para validar um caso ainda não validado | 
-
-* Relatório do ANAFAS: Importar Relatórios de Níveis de Curto-circuito, dados de curto-circuito e impedâncias de barra.
+| Relatórios do ANAFAS | só para validar um caso ainda não validado — ver abaixo |
 
 Gere o `lincc_bundle.py` com `python ferramentas/gerar_bundle.py`, ou baixe-o dos releases.
 
-### Prompt para usar
+Quais relatórios exportar do ANAFAS, em ordem de importância:
+
+| Relatório | Papel |
+|---|---|
+| **Impedâncias de barra** | Indispensável. Z₁, Z₀ e (Z₀+Z₂) com 10 decimais — o gabarito de verdade. Dele se derivam os três níveis |
+| **Níveis de curto-circuito** | Indispensável para validar `fault_fc`: é o único que inclui a contribuição dos conversores |
+| Dados de curto-circuito | Dispensável. Repete Z com 4 decimais e traz MVA já derivável dos outros dois |
+
+Exporte sempre o de impedâncias de barra, mesmo quando o estudo pedir só níveis: é ele que permite
+separar erro de cálculo de arredondamento de relatório.
+
+#### Prompt para usar
 
 Para análise em caso já validado. É o uso normal.
 
@@ -210,7 +228,7 @@ diga o que falta em vez de estimar.
 O que eu preciso: <descreva o estudo>
 ```
 
-### Prompt para validar um caso novo
+#### Prompt para validar um caso novo
 
 Todo caso que você ainda não conferiu passa por aqui antes de virar estudo. O parser lê o formato,
 não um caso específico — mas um tipo de registro que não apareça no caso de referência é ignorado
@@ -228,7 +246,7 @@ em Z1 e Z0 — não erro médio, não faixa de 5%.
    - o cabeçalho do relatório de níveis é ACENTUADO ("RELATÓRIO DE NÍVEIS"); delimitar seção
      procurando só por "RELATORIO" faz a leitura atravessar para dentro dele;
    - valor mais largo que a coluna invade o campo anterior, e a leitura por coluna fixa perde o
-     dígito inicial. Utilize sempre a seção de alta precisão, quando disponível. 
+     dígito inicial.
 3. Compare por barra. Reporte %<1%, %<5%, mediana e estratificação por classe de tensão.
 4. Só então investigue as barras acima de 1%, uma a uma: localize o elemento por
    I_terra = rowsum(Y0)·V, confirme no registro cru do .ANA, e valide qualquer correção medindo o
@@ -252,9 +270,10 @@ Se preferir não depender do agente para isso, o repositório traz o mesmo proce
 python examples/validar_caso.py CASO.ANA RELATORIO.LST
 ```
 
-### Depois da inicialização
+#### Depois da inicialização
 
-O chat fica pronto para pedidos em linguagem natural.
+O chat fica pronto para pedidos em linguagem natural: evolução de curto pela entrada de um
+equipamento, varredura N-1, insumos de seletividade, corrente mínima de recomposição para 87B.
 Descrever a aplicação e o critério do seu estudo melhora bastante o resultado.
 
 ### Grandezas básicas

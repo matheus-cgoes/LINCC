@@ -5,17 +5,11 @@ Thévenin por coluna da Zbus sob demanda (método de vetores esparsos), evitando
 from __future__ import annotations
 
 import numpy as np, pickle, re
+import json as _json
 from scipy.sparse import lil_matrix, csc_matrix
 from scipy.sparse.linalg import splu
 from scipy.sparse.csgraph import connected_components
 from collections import defaultdict
-
-import json as _json
-
-import numpy as np
-from scipy.sparse import lil_matrix, csc_matrix
-from scipy.sparse.linalg import splu
-from scipy.sparse.csgraph import connected_components
 
 SB = 100.0   # potência base, MVA
 
@@ -396,7 +390,20 @@ class Solver:
         return Z1,Z2,Z0
 
     def fault(self, bus, kind='3F', Zf=0.0, Vf=1.0):
-        """kind: '3F','1FT','2F','2FT'. Zf em pu. Retorna corrente em kA."""
+        """kind: '3F','1FT','2F','2FT'. Zf em pu. Retorna corrente em kA primários.
+
+        Convenções, todas reconciliadas com o relatório da ferramenta de referência:
+          3F   I = Vf / (Z1 + Zf)
+          1FT  I = 3·Vf / (Z1 + Z2 + Z0 + 3·Zf)
+          2F   I = √3·Vf / (Z1 + Z2 + 2·Zf)
+          2FT  I = √3 · max(|Ib|, |Ic|), com Ib,c = Vf·(Z0 − a^{1,2}·Z2) / (Z1Z2 + Z1Z0 + Z2Z0)
+               O fator √3 e o uso da MAIOR das duas fases em falta foram determinados por
+               reconciliação barra a barra: reproduzem exatamente as colunas de kA e de MVA
+               do relatório (escolher a outra fase erra até 0,5%).
+
+        Não inclui geradores full-converter (fontes de corrente): este é o Thévenin puro da
+        Ybus. Para incluí-los, use `fault_fc`.
+        """
         kv=self.M.bus_kv.get(bus,0)
         if not kv: return None
         Ib=SB/(np.sqrt(3)*kv)
@@ -412,9 +419,13 @@ class Solver:
             I=abs(np.sqrt(3)*Vf/(Z1+Z2+2*zf))
         elif kind=='2FT':
             if Z0 is None: return None
-            den=Z1*Z2+Z1*Z0+Z2*Z0
-            I=abs(Vf*np.sqrt(3)*abs(Z0-(0))/den) if False else abs(Vf*np.sqrt(3)* \
-               abs(Z2 + 2*Z0)/ (Z1*Z2 + (Z1+Z2)*(Z0+3*zf)))  # módulo aproximado das fases sãs
+            z1f, z2f, z0f = Z1+zf, Z2+zf, Z0+zf
+            den=z1f*z2f + z1f*z0f + z2f*z0f
+            if abs(den)<1e-18: return None
+            a=np.exp(2j*np.pi/3)
+            ib=Vf*(z0f - a*z2f)/den
+            ic=Vf*(z0f - a.conjugate()*z2f)/den
+            I=np.sqrt(3)*max(abs(ib),abs(ic))
         else:
             return None
         return I*Ib

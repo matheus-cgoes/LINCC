@@ -95,3 +95,30 @@ def test_caso_minimo_correntes(minimo):
     ib230 = SB / (math.sqrt(3) * 230.0)
     assert minimo.fault(2, "3F") == pytest.approx(ib230 / 0.375, rel=1e-6)
     assert minimo.fault(2, "1FT") == pytest.approx(3 * ib230 / (2 * 0.375 + 0.875), rel=1e-6)
+
+
+# ---------- convenção da falta bifásica-terra ----------
+
+def test_bifasica_terra_convencao_do_relatorio(radial):
+    """2FT = √3·max(|Ib|,|Ic|), com Ib,c = (Z0 − a^{1,2}·Z2)/(Z1Z2+Z1Z0+Z2Z0).
+
+    Regressão: a implementação anterior usava uma expressão aproximada e errava por ~85%
+    contra o relatório de referência.
+    """
+    z1 = complex(0, 0.20)
+    z0 = complex(0, 0.35 * 0.08 / 0.43)
+    z2 = z1
+    a = complex(-0.5, math.sqrt(3) / 2)
+    den = z1 * z2 + z1 * z0 + z2 * z0
+    ib = abs((z0 - a * z2) / den)
+    ic = abs((z0 - a.conjugate() * z2) / den)
+    esperado = math.sqrt(3) * max(ib, ic) * IB138
+    assert radial.fault(2, "2FT") == pytest.approx(esperado, rel=1e-9)
+
+
+def test_bifasica_terra_entre_trifasica_e_monofasica(radial):
+    """Sanidade física: numa rede com Z0 > Z1, a 2FT fica entre a 3F e a 1FT."""
+    i3 = radial.fault(2, "3F")
+    i1 = radial.fault(2, "1FT")
+    i2t = radial.fault(2, "2FT")
+    assert min(i1, i3) <= i2t <= max(i1, i3)
