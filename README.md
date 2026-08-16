@@ -155,7 +155,8 @@ python ferramentas/gerar_bundle.py
 python -c "from lincc_bundle import AnaModel, Solver; print('ok')"
 ```
 
-Sempre corrija no pacote e regenere — nunca o contrário.
+Sempre corrija no pacote e regenere — nunca o contrário. O bundle é versionado na raiz para poder ser
+baixado sem clonar; o CI reprova se ele divergir do pacote, então regenere e inclua no mesmo commit.
 
 ### Árvore
 
@@ -165,6 +166,7 @@ tests/            test_casos_sinteticos.py + cases/ (3 casos sintéticos + ESPER
 examples/         validar_caso.py
 ferramentas/      gerar_bundle.py
 docs/             formato-ana.md  mutuas.md  validacao.md  scripts.md
+lincc_bundle.py   motor em arquivo único, gerado do pacote (para anexar em sessão de chat)
 ```
 
 ---
@@ -185,7 +187,8 @@ todo número sai do motor.
 | `CASO.ANA` | sempre |
 | Relatórios do ANAFAS | só para validar um caso ainda não validado — ver abaixo |
 
-Gere o `lincc_bundle.py` com `python ferramentas/gerar_bundle.py`, ou baixe-o dos releases.
+Gere o `lincc_bundle.py` com `python ferramentas/gerar_bundle.py`, ou baixe-o direto da raiz do
+repositório — ele é versionado, e o CI garante que está sincronizado com o pacote.
 
 Quais relatórios exportar do ANAFAS, em ordem de importância:
 

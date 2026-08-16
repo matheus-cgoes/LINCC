@@ -15,9 +15,6 @@ dados_internos/
 # material privado: benchmark do caso real, prompts de trabalho, notas internas
 _privado/
 
-# bundle: e concatenacao do proprio pacote, gerado por ferramentas/gerar_bundle.py
-lincc_bundle.py
-
 # artefatos do motor
 *.pkl
 *_err.json

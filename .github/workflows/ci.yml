@@ -12,3 +12,26 @@ jobs:
         with: { python-version: "${{ matrix.python }}" }
       - run: pip install -e ".[dev]"
       - run: pytest -q
+
+  bundle-sincronizado:
+    # O lincc_bundle.py e versionado por conveniencia (anexar em sessao de chat sem clonar
+    # o repositorio), mas e uma concatenacao de src/lincc/. Se alguem corrigir o pacote e
+    # esquecer de regenerar, o bundle publicado passa a divergir do codigo em silencio.
+    # Este job regenera e compara: divergencia reprova o build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python ferramentas/gerar_bundle.py -o /tmp/bundle_esperado.py
+      - name: comparar com o bundle versionado
+        run: |
+          if ! diff -u lincc_bundle.py /tmp/bundle_esperado.py; then
+            echo "::error::lincc_bundle.py esta dessincronizado do pacote."
+            echo "Rode 'python ferramentas/gerar_bundle.py' e faca commit do resultado."
+            exit 1
+          fi
+      - name: o bundle importa sozinho
+        run: |
+          pip install numpy scipy
+          python -c "import sys; sys.path.insert(0,'.'); from lincc_bundle import AnaModel, Solver; print('ok')"

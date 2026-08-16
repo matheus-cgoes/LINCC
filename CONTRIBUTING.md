@@ -28,6 +28,18 @@ barra específica e derruba o resultado global de 98,9% para 98,0%. A hipótese 
 - Ajuste empírico barra a barra sem mecanismo físico identificado. Se não sabe *por que* funciona, não
   está pronto.
 
+## Ao mexer no pacote, regenere o bundle
+
+`lincc_bundle.py` é uma concatenação de `src/lincc/`, versionada na raiz para poder ser baixada sem
+clonar o repositório. Se você alterar qualquer módulo do pacote, regenere e inclua no mesmo commit:
+
+```bash
+python ferramentas/gerar_bundle.py
+```
+
+O CI verifica isso (`bundle-sincronizado`) e reprova se divergir. Nunca edite o bundle diretamente:
+a próxima geração apaga a alteração.
+
 ## Estilo
 
 Português nos comentários e na documentação. Nomes de variáveis podem seguir a notação da engenharia

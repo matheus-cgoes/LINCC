@@ -137,9 +137,16 @@ O bundle é a mesma lógica do pacote: docstring de módulo e imports internos s
 arquivo, e um cabeçalho comum é adicionado. A API exportada é idêntica.
 
 **Corrija sempre no pacote e regenere.** Editar o bundle e esquecer o pacote é o jeito mais direto de
-perder a correção na próxima geração. Pelo mesmo motivo, o bundle **não** deve ser versionado dentro
-de `src/lincc/`: ele duplicaria o código do próprio pacote e seria instalado como módulo. O lugar dele
-é a raiz do repositório (ignorada pelo git) ou os releases.
+perder a correção na próxima geração.
+
+O bundle **é versionado**, na raiz do repositório, para que se possa baixá-lo direto sem clonar nem
+rodar Python — é o caso de uso principal, anexar o motor numa sessão de chat. Isso traz um risco:
+alguém corrige o pacote, esquece de regenerar, e o bundle publicado passa a divergir do código em
+silêncio. Por isso o CI tem um job (`bundle-sincronizado`) que regenera e compara: se divergir, o
+build reprova. **Ao mexer no pacote, regenere e inclua o bundle no mesmo commit.**
+
+O que ele **não** deve fazer é viver dentro de `src/lincc/`: ali duplicaria o código do próprio pacote
+e seria instalado como módulo junto com ele.
 
 ---
 
