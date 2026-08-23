@@ -122,3 +122,30 @@ def test_bifasica_terra_entre_trifasica_e_monofasica(radial):
     i1 = radial.fault(2, "1FT")
     i2t = radial.fault(2, "2FT")
     assert min(i1, i3) <= i2t <= max(i1, i3)
+
+
+def test_le_arquivo_com_lf_puro(tmp_path):
+    """Regressão: .ANA normalizado para LF deve ser lido.
+
+    O formato nativo é CRLF, mas basta o arquivo passar por um controle de versão com
+    normalização de fim de linha para virar LF. Com split('\\r\\n') o arquivo inteiro vira
+    uma única linha e o parser não acha bloco nenhum — falha silenciosa, sem exceção.
+    """
+    caso = tmp_path / "lf.ANA"
+    caso.write_bytes(b"(caso LF\nDBAR\n    1    A               138\n99999\nDCIR\n99999\n")
+    M = AnaModel(str(caso))
+    assert len(M.bus_kv) == 1
+
+
+def test_modo_completo_bloqueado_ate_validar(radial):
+    """O modo 'completo' não responde antes de validar_completo() aprovar o caso.
+
+    Emitir número de injeção não validado num estudo de proteção é pior do que não
+    emitir: o bloqueio é parte do modelo de uso, não conveniência.
+    """
+    assert radial.fault(2, "3F") > 0                      # modo padrão responde
+    assert radial.fault(2, "3F", modo="sincronas") == radial.fault(2, "3F")
+    with pytest.raises(RuntimeError, match="bloqueado"):
+        radial.fault(2, "3F", modo="completo")
+    with pytest.raises(ValueError, match="modo deve ser"):
+        radial.fault(2, "3F", modo="inexistente")
