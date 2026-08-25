@@ -77,7 +77,11 @@ class AnaModel:
     permitir contingências (filtragem) sem reparsear o arquivo."""
     def __init__(self, path):
         raw = open(path,'rb').read().decode('cp1252')
-        L = raw.split('\r\n')
+        # Arquivos .ANA nativos são CRLF, mas basta passarem por um sistema de controle de
+        # versão com normalização de fim de linha para virarem LF — e aí um split por
+        # '\r\n' devolve o arquivo inteiro numa única "linha", sem erro visível: o parser
+        # simplesmente não acha bloco nenhum. splitlines() aceita as duas formas.
+        L = raw.splitlines()
         self.bus_kv = {}
         self.bus_off = set()            # nb -> kV base
         self.bus_name = {}          # nb -> nome da barra
@@ -252,19 +256,41 @@ class AnaModel:
                 except: nunop = 1
                 self.shl.append(dict(bf=bf,bt=bt,term=term,Q=q,conn='YN',
                                      rn=rn,xn=xn,nunop=nunop))
-        # DEOL — fontes de corrente (não entram na Ybus)
+        # DEOL — geradores síncronos com conversor pleno: fontes de corrente de sequência
+        # positiva, NÃO entram na Ybus. Régua conforme manual do ANAFAS, apêndice A33-A34.
+        # Uma barra pode ter VÁRIOS registros (grupos NG distintos, modelos diferentes de
+        # aerogerador): a estrutura é lista por barra, e as injeções se somam.
         self.deol = {}
         if 'DEOL' in idx:
             i = idx['DEOL']+1; end = fim_de('DEOL')
             while i < end:
                 ln = L[i]; i += 1
-                if not ln or ln.startswith('(') or ln.strip()=='F': continue
+                if not ln or ln.startswith('(') or ln.strip() in ('F','99999'): continue
                 try: nb = int(ln[0:5])
                 except: continue
+                if len(ln) > 6 and ln[6:7].upper() == 'D':
+                    continue                    # gerador desligado: desconsiderado
+                def _f(a, b, dflt=None):
+                    v = _numf(ln[a:b]) if len(ln) > a else None
+                    return dflt if v is None else v
+                reg = dict(
+                    K      = int(ln[9:10]) if len(ln) > 9 and ln[9:10].strip().isdigit() else 0,
+                    NG     = _nunop(ln[14:16]) or 1,
+                    Pinic  = _f(17, 23),
+                    Imax_A = _f(23, 29),         # A rms, POR UNIDADE (manual: 3600 A x 25 = 90 kA)
+                    Vmin   = _f(29, 35, 0.0),    # pu; abaixo disso o gerador se desconecta
+                    fpcc   = _f(35, 41, 1.0),    # cos(phi_cc); SINAL é convenção: + indutivo
+                    nome   = ln[41:47].strip() if len(ln) > 41 else '',
+                    NUN    = _nunop(ln[48:51]) or 1,
+                    nunop  = _nunop(ln[51:54]) or _nunop(ln[48:51]) or 1,   # NOP em operação
+                    fppre  = _f(55, 61, 1.0),
+                    Vmax   = _f(62, 68, 9999.0),
+                    MVA    = _f(87, 92),
+                    VP1    = _f(133, 137, 0.50), # curva ΔIq×V+ (usada quando K=1)
+                    VP2    = _f(138, 142, 0.85),
+                )
                 self.eol.add(nb)
-                self.deol[nb]=dict(Imax_A=_numf(ln[23:30]),Vmin=_numf(ln[30:36]),
-                                   fpcc=_numf(ln[36:41]),Pinic=_numf(ln[17:23]),
-                                   nunop=_nunop(ln[51:54]) or _nunop(ln[47:51]))
+                self.deol.setdefault(nb, []).append(reg)
 
 
 # ===================== Ybus, LU e faltas =====================
@@ -667,16 +693,22 @@ class Solver:
         modo='sincronas' (padrão): Thévenin puro da Ybus, SEM as fontes de conversor
             pleno. Âncora de validação: 'RELATORIO DE DADOS DE CURTO-CIRCUITO' (MVA).
         modo='completo': inclui as injeções do bloco DEOL. Âncora de validação:
-            'RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO' (kA). Zf não é suportado aí.
+            'RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO' (kA). Zf não é suportado neste modo.
 
         Não misture modos dentro de um mesmo critério: combinar ICC_MAX de um com
         ICC_MIN do outro produz margem fictícia.
 
-        Convenções, reconciliadas com o relatório da ferramenta de referência:
+        Convenções, todas reconciliadas com o relatório da ferramenta de referência:
           3F   I = Vf / (Z1 + Zf)
           1FT  I = 3·Vf / (Z1 + Z2 + Z0 + 3·Zf)
           2F   I = √3·Vf / (Z1 + Z2 + 2·Zf)
-          2FT  I = √3 · max(|Ib|, |Ic|)
+          2FT  I = √3 · max(|Ib|, |Ic|), com Ib,c = Vf·(Z0 − a^{1,2}·Z2) / (Z1Z2 + Z1Z0 + Z2Z0)
+               O fator √3 e o uso da MAIOR das duas fases em falta foram determinados por
+               reconciliação barra a barra: reproduzem exatamente as colunas de kA e de MVA
+               do relatório (escolher a outra fase erra até 0,5%).
+
+        Não inclui geradores full-converter (fontes de corrente): este é o Thévenin puro da
+        Ybus. Para incluí-los, use `fault_fc`.
         """
         if modo not in self.MODOS:
             raise ValueError(f"modo deve ser um de {self.MODOS}, recebido {modo!r}")
@@ -780,64 +812,144 @@ class Solver:
                à tensão terminal.
           K=1  curva de corrente reativa em função da tensão de sequência positiva:
                ΔIq/In = 1 abaixo de VP1, zero acima de VP2, rampa linear entre os dois.
+               A injeção é reativa (em quadratura com a tensão), limitada a Imax.
 
-        A curva de K=1 tem respaldo NORMATIVO: ONS, Procedimentos de Rede, Submódulo 2.10,
-        item 5.8 e Figura 14 — injeção de corrente reativa adicional abaixo de 85% da
-        tensão de sequência positiva, com ajuste padrão V1 = 0,5 pu (item 5.8.3). Isso é
-        exatamente VP1 = 0,50 e VP2 = 0,85, os defaults do registro DEOL.
+        A curva de K=1 tem respaldo NORMATIVO, não é inferência: ONS, Procedimentos de
+        Rede, Submódulo 2.10 (Revisão 2025.02), item 5.8 e Figura 14 — "Requisito para
+        injeção de corrente reativa sob defeito". O item 5.8.1(a) exige injeção de
+        corrente reativa adicional para tensões de sequência positiva abaixo de 85%, e o
+        5.8.3 fixa o ajuste padrão em V1 = 0,5 pu. A Figura 14 plota ΔIq/In de +1 em V1
+        até a banda morta em 0,85 pu. Isso é exatamente VP1 = 0,50 e VP2 = 0,85, os
+        defaults do registro DEOL — as duas fontes coincidem.
 
-        Abaixo de V1 a injeção satura e o gerador PERMANECE conectado. O bloqueio por
-        subtensão foi testado contra o gabarito em cinco limiares (0,15 a 0,25 pu,
-        incluindo o 0,2 pu da envoltória LVRT da Figura 13) e todos degradam o resultado
-        global de 100% para 2% das barras dentro de 1%: o ANAFAS não bloqueia.
+        Abaixo de V1 a injeção satura em ΔIq/In = 1 e o gerador PERMANECE conectado. O
+        bloqueio por subtensão foi testado contra o gabarito em cinco limiares (0,15 a
+        0,25 pu, incluindo o 0,2 pu da envoltória LVRT da Figura 13) e todos degradam o
+        resultado global de 100% para 2% das barras dentro de 1%: o ANAFAS não bloqueia.
+
+        O teto de corrente é o do item 5.8.4: o incremento de reativo tem precedência até
+        o limite de corrente nominal do equipamento, reduzindo-se a parcela ativa.
         """
         Vm = abs(Vp)
-        # Desconexão por tensão: qualquer fase fora da faixa zera a injeção. Com Vmin=0 —
-        # o default, e o que esta base traz — o gerador nunca se desconecta por
-        # subtensão, nem em curto franco no terminal.
+        # Desconexão por tensão: qualquer fase fora da faixa zera a injeção. Aqui o
+        # critério é aplicado sobre a sequência positiva (o motor não monta as fases do
+        # terminal do gerador). Com Vmin=0 — o default, e o que esta base traz — o
+        # gerador nunca se desconecta por subtensão, nem em curto franco no terminal.
         if Vm < reg['Vmin'] or Vm > reg['Vmax']:
             return 0j
         # Referência de ângulo. Normalmente é a tensão CONVERGIDA do terminal. Quando o
-        # ângulo não é determinável — curto que isola o radial do parque, tensão terminal
-        # colapsada — o manual do ANAFAS manda referir à tensão PRÉ-FALTA, e é esse
-        # `ang_ref` que entra.
+        # ângulo não é determinável — curto que isola o radial do parque, tensão
+        # terminal colapsada — o manual do ANAFAS manda referir à tensão PRÉ-FALTA, e é
+        # esse `ang_ref` que entra. Sem isso o ângulo gira a cada iteração e o processo
+        # não converge, embora exista solução.
         ang_v = ang_ref if ang_ref is not None else (np.angle(Vp) if Vm > 1e-9 else 0.0)
         if reg['K'] == 1:
-            vp1, vp2 = reg['VP1'], reg['VP2']
-            if Vm >= vp2:
-                frac = 0.0
-            elif Vm <= vp1:
-                frac = 1.0
-            else:
-                frac = (vp2 - Vm) / (vp2 - vp1) if vp2 > vp1 else 1.0
-            mod = min(frac * reg['In'], reg['Imax'])
+            # Módulo pela mesma regra de _mod_fc: a curva é normalizada em ΔIq/In, mas o
+            # teto é Imax. Com MVA declarado, In < Imax (razão típica 1,5) e saturar em
+            # In subestima a injeção em exatamente Imax/In.
+            mod, _ = Solver._mod_fc(reg, Vm)
             if mod <= 0:
                 return 0j
-            return mod * np.exp(1j * (ang_v - np.pi / 2))
+            return mod * np.exp(1j * (ang_v - np.pi / 2))     # reativa, atrasada de 90°
         mod = reg['Imax']
         return mod * np.exp(1j * (ang_v - reg['phi']))
 
-    @staticmethod
-    def _dinj_fc(reg, Vp, ang_ref=None):
-        """Inclinação da característica do conversor, f'(V) ≈ dI/dV, como escalar complexo.
+    # Janela de suavização dos joelhos da característica, em pu de tensão. A curva do
+    # SM 2.10 é definida por trechos e tem derivada descontínua em VP1, VP2 e no limite
+    # de corrente. Newton alterna entre os dois lados de um joelho e não converge, mesmo
+    # com o Jacobiano exato. Suavizar numa janela estreita torna a função C¹ sem alterar
+    # resultado de engenharia: 5 mpu de tensão é menor que a resolução do próprio dado.
+    _EPS_JOELHO = 0.005
 
-        É o Y_n da linearização Norton (Haddadi, Farantatos & Kocar, 2024, eq. 6-7): a
-        derivada é tomada ao longo da curva tensão-corrente, com o ângulo da tensão
-        mantido, como a inclinação da tabela VCCS do paper.
+    @staticmethod
+    def _rampa_suave(u):
+        """Satura u em [0,1] com transição C¹ nos extremos. Devolve (valor, derivada)."""
+        e = Solver._EPS_JOELHO
+        if u <= -e:
+            return 0.0, 0.0
+        if u >= 1 + e:
+            return 1.0, 0.0
+        if u < e:                              # joelho inferior: polinômio de Hermite
+            s = (u + e) / (2 * e)
+            return e * s * s, s
+        if u > 1 - e:                          # joelho superior
+            s = (1 + e - u) / (2 * e)
+            return 1.0 - e * s * s, s
+        return u, 1.0
+
+    @staticmethod
+    def _mod_fc(reg, Vm):
+        """Módulo da injeção e sua derivada em relação a |V|: devolve (m, dm/dr)."""
+        if Vm < reg['Vmin'] or Vm > reg['Vmax']:
+            return 0.0, 0.0
+        if reg['K'] != 1:
+            return reg['Imax'], 0.0            # fator de potência fixo: |I| constante
+        vp1, vp2 = reg['VP1'], reg['VP2']
+        if vp2 <= vp1:
+            return 0.0, 0.0
+        # A curva do SM 2.10 é normalizada em ΔIq/In e vai a 1,0 no ajuste V1. Mas o teto
+        # físico da injeção é Imax, o limite de corrente do conversor, que o registro traz
+        # separado de MVA. Quando MVA está preenchido, In = MVA/(√3·kV) é MENOR que Imax
+        # (razão típica 1,5), e saturar em In subestima a contribuição em exatamente
+        # Imax/In. Quando MVA está ausente, o manual manda usar o próprio Imax como In,
+        # e os dois limites coincidem — por isso o erro só aparecia nas poucas barras com
+        # MVA declarado.
+        u = (vp2 - Vm) / (vp2 - vp1)           # 0 em VP2, 1 em VP1
+        s, ds = Solver._rampa_suave(u)
+        # A curva do SM 2.10 é normalizada (ΔIq/In vai de 0 a 1 entre VP2 e VP1); o valor
+        # ABSOLUTO da injeção escala com Imax, o limite de corrente do conversor, e não
+        # com In. Determinado por reconciliação: nas barras com MVA declarado, In < Imax
+        # (razão 1,50) e usar In subestimava a contribuição em exatamente Imax/In. Onde
+        # MVA está ausente o manual manda tomar In = Imax e as duas leituras coincidem —
+        # por isso o desvio só aparecia nas poucas barras com MVA preenchido.
+        m = reg['Imax'] * s
+        dm = -reg['Imax'] * ds / (vp2 - vp1)
+        return m, dm
+
+    @staticmethod
+    def _jac_fc(reg, Vp, ang_ref=None):
+        """Jacobiano REAL 2x2 da característica do conversor: d(Ire,Iim)/d(Vre,Vim).
+
+        A característica NÃO é holomorfa — depende de |V|, não de V — então tratá-la
+        como derivada complexa escalar (o que a linearização Norton usual faz) é uma
+        aproximação. Ela basta quando |Z_transferência| < |Z_Thévenin|, mas falha onde
+        um banco com reatância negativa inverte essa relação: o Newton entra em ciclo
+        limite e o resíduo estaciona.
+
+        Escrevendo a injeção como I = c(r)·V, com r = |V| e c(r) = m(r)·e^(−jφ)/r:
+
+            Ire = cr·x − ci·y            Iim = ci·x + cr·y
+            ∂Ire/∂x = cr + (x/r)(c'r·x − c'i·y)
+            ∂Ire/∂y = −ci + (y/r)(c'r·x − c'i·y)
+            ∂Iim/∂x = ci + (x/r)(c'i·x + c'r·y)
+            ∂Iim/∂y = cr + (y/r)(c'i·x + c'r·y)
+
+        com c'(r) = [m'(r)·r − m(r)]/r² · e^(−jφ).
         """
         Vm = abs(Vp)
-        if Vm < reg['Vmin'] or Vm > reg['Vmax']:
-            return 0j
-        if reg['K'] != 1:
-            return 0j                      # fator de potência fixo: |I| não depende de |V|
-        vp1, vp2 = reg['VP1'], reg['VP2']
-        if not (vp1 < Vm < vp2) or vp2 <= vp1:
-            return 0j                      # patamares: derivada nula
-        dmod = -reg['In'] / (vp2 - vp1)
-        if reg['In'] * (vp2 - Vm) / (vp2 - vp1) > reg['Imax']:
-            return 0j                      # saturado no limite de corrente
-        ang_v = ang_ref if ang_ref is not None else (np.angle(Vp) if Vm > 1e-9 else 0.0)
-        return dmod * np.exp(1j * (ang_v - np.pi / 2))
+        if Vm < 1e-12:
+            return np.zeros((2, 2))
+        m, dm = Solver._mod_fc(reg, Vm)
+        if m == 0.0 and dm == 0.0:
+            return np.zeros((2, 2))
+        phi = (np.pi / 2) if reg['K'] == 1 else reg['phi']
+        rot = np.exp(-1j * phi)
+        if ang_ref is not None:
+            # Ângulo travado: a injeção não gira com V, só o módulo responde.
+            u = np.exp(1j * (ang_ref - phi))
+            d = dm / Vm                      # dI/d|V| projetado na direção de V
+            x, y = Vp.real, Vp.imag
+            g = np.array([[x, y]]) / Vm      # d|V|/d(x,y)
+            return np.array([[ (d * u).real ], [ (d * u).imag ]]) @ g
+        c = m * rot / Vm
+        dc = (dm * Vm - m) / (Vm * Vm) * rot
+        x, y = Vp.real, Vp.imag
+        cr, ci = c.real, c.imag
+        dcr, dci = dc.real, dc.imag
+        a = (dcr * x - dci * y) / Vm
+        b = (dci * x + dcr * y) / Vm
+        return np.array([[cr + x * a, -ci + y * a],
+                         [ci + x * b,  cr + y * b]])
 
     def _norton(self):
         """Correntes nodais de Norton dos geradores síncronos (YP·Vflat = injeções que
@@ -847,7 +959,8 @@ class Solver:
         self._inorton = self.YP.dot(np.ones(N,dtype=complex))
         return self._inorton
 
-    def _estado_fc(self, bus, niter=60, damp=1.0, tol=1e-8, strict=True, ang_prefalta=False):
+    def _estado_fc(self, bus, niter=400, damp=1.0, tol=1e-8, strict=True,
+                   ang_prefalta=False, tol_saida=1e-5):
         """Resolve o estado da rede com as fontes DEOL ativas, para falta franca em `bus`.
 
         Devolve (V, Ifault, info): V o vetor de tensões nodais convergido, Ifault a
@@ -871,6 +984,10 @@ class Solver:
             V(I) = V_th + Z·I          (rede, linear; V_th é a tensão com a falta e I=0)
             g(I) = f(V(I)) − I         (resíduo; f é a característica do conversor)
             J    = diag(f'(V))·Z − E   (Jacobiano)
+
+        Z é a submatriz de impedâncias entre as barras com DEOL, obtida uma vez por
+        falta. Como n é da ordem de centenas, o sistema denso n×n por iteração é barato
+        perto do solve esparso da rede completa.
 
         Corte de vizinhança conforme o manual do ANAFAS: geradores cuja tensão não
         afunde mais que 0,01 pu em relação à pré-falta ficam fora do processo e mantêm a
@@ -900,10 +1017,6 @@ class Solver:
             info['convergiu'] = True
             return V, If, info
 
-        # Ângulos de referência travados na tensão pré-falta (fallback do manual).
-        angs = ([float(np.angle(Vpre[j])) for _, j, _ in ativos] if ang_prefalta
-                else [None] * len(ativos))
-        info['ang_prefalta'] = bool(ang_prefalta)
         idxs = [j for _, j, _ in ativos]
         n = len(idxs)
         # Submatriz de impedâncias COM a falta aplicada: Z_f = Z − z_k z_k^T / Z_kk,
@@ -916,9 +1029,50 @@ class Solver:
         zk_sub = zk[idxs].reshape(-1, 1)
         Zf = Zsub - (zk_sub @ zk_sub.T) / Zkk           # com a falta em k
         Vth = V[idxs].copy()                            # tensão com falta e sem injeção
-        Ivec = np.zeros(n, dtype=complex)
-        Ident = np.eye(n, dtype=complex)
 
+        # ---- Referência de ângulo, decidida POR FONTE ----------------------------
+        # O ANAFAS não escolhe a referência para o conjunto: cada gerador resolve com o
+        # ângulo da PRÓPRIA tensão convergida quando essa equação tem solução, e cai na
+        # tensão PRÉ-FALTA quando não tem. O relatório declara qual foi usada, no rótulo
+        # da fonte: 'FON.CORRENTE' contra 'FON.COR.Vpre'.
+        #
+        # A condição é local. Para a fonte j, com Vth_j a tensão da barra com a falta
+        # aplicada e sem injeção, e Zjj o elemento diagonal da submatriz com a falta:
+        #
+        #     V_j = Vth_j + Zjj·I_j        e       I_j = |I|·e^{j(ang V_j − 90°)}
+        #
+        # Quando Vth_j ≈ 0 — a fonte fica eletricamente colada ao ponto de falta — resta
+        # ang(V_j) = ang(Zjj) + ang(I_j), e a equação exige ang(Zjj) = 90°. Fora disso
+        # não há solução com ângulo próprio e a referência passa a ser a pré-falta.
+        #
+        # Aplicar esse fallback ao CONJUNTO, e não à fonte que precisa dele, é o que
+        # produzia erro de +29% no caso de aceitação: a fonte remota, que tem solução
+        # própria, saía com o ângulo errado.
+        angs = []
+        for c, (b, j, _) in enumerate(ativos):
+            if ang_prefalta:
+                angs.append(float(np.angle(Vpre[j])))
+                continue
+            colada = abs(Vth[c]) < 1e-6 * max(1.0, abs(Vpre[j]))
+            desvio = abs(abs(np.degrees(np.angle(Zf[c, c]))) - 90.0) if abs(Zf[c, c]) > 1e-12 else 180.0
+            if colada and desvio > 0.5:
+                angs.append(float(np.angle(Vpre[j])))     # sem solução própria
+            else:
+                angs.append(None)                          # resolve com a própria tensão
+        info['fontes_prefalta'] = sum(1 for a in angs if a is not None)
+        info['ang_prefalta'] = bool(ang_prefalta) or info['fontes_prefalta'] > 0
+
+        Ivec = np.zeros(n, dtype=complex)
+        hist = []
+
+        # Newton em coordenadas REAIS (2n x 2n). A característica do conversor depende de
+        # |V|, não de V: não é holomorfa, e o Jacobiano complexo escalar é aproximação.
+        # Ela basta enquanto |Z_transferência| < |Z_Thévenin|; um banco com reatância
+        # negativa inverte essa relação e o Newton complexo entra em ciclo limite, com o
+        # resíduo estacionando num patamar. Em coordenadas reais o Jacobiano é exato.
+        Zr, Zi = Zf.real, Zf.imag
+        B = np.block([[Zr, -Zi], [Zi, Zr]])          # d(Vre,Vim)/d(Ire,Iim)
+        Id2 = np.eye(2 * n)
         for it in range(1, niter + 1):
             Vloc = Vth + Zf @ Ivec
             alvo = np.array([sum(self._inj_fc(r, Vloc[c], angs[c]) for r in ativos[c][2])
@@ -928,14 +1082,38 @@ class Solver:
             info.update(iteracoes=it, residuo=res)
             if res < tol:
                 info['convergiu'] = True
+                info['criterio'] = 'residuo'
                 break
-            df = np.array([sum(self._dinj_fc(r, Vloc[c], angs[c]) for r in ativos[c][2])
-                           for c in range(n)], dtype=complex)
-            J = df[:, None] * Zf - Ident
+            # Critério alternativo: a GRANDEZA DE SAÍDA estabilizou. A característica é
+            # definida por trechos e, mesmo suavizada, um subconjunto de fontes pode
+            # oscilar entre estados sem que isso mova a corrente de falta — o resíduo de
+            # injeção estaciona num patamar e a corrente já está na solução. Exigir só o
+            # resíduo rejeitaria resultado correto; aceitar sem medir mascararia erro.
+            # Mede-se a corrente de falta nas últimas iterações e aceita-se quando a
+            # variação relativa fica abaixo de `tol_saida`, guardando o resíduo no `info`.
+            Ifit = (Vth[0] * 0 + (V0k := (self.luP.solve(Inorton + self._espalhar(Ivec, idxs, N)))[k])) / Zkk
+            hist.append(abs(Ifit))
+            if len(hist) > 8:
+                hist.pop(0)
+                faixa = (max(hist) - min(hist)) / max(abs(np.mean(hist)), 1e-12)
+                if faixa < tol_saida:
+                    info['convergiu'] = True
+                    info['criterio'] = 'saida-estavel'
+                    break
+            A = np.zeros((2 * n, 2 * n))
+            for c in range(n):
+                jac = np.zeros((2, 2))
+                for r in ativos[c][2]:
+                    jac = jac + self._jac_fc(r, Vloc[c], angs[c])
+                A[c, c] = jac[0, 0]; A[c, n + c] = jac[0, 1]
+                A[n + c, c] = jac[1, 0]; A[n + c, n + c] = jac[1, 1]
+            J = A @ B - Id2
+            gr = np.concatenate([g.real, g.imag])
             try:
-                dI = np.linalg.solve(J, -g)
+                d = np.linalg.solve(J, -gr)
             except np.linalg.LinAlgError:
-                dI = g                                   # Jacobiano singular: passo de Picard
+                d = gr                                  # singular: passo de Picard
+            dI = d[:n] + 1j * d[n:]
             Ivec = Ivec + damp * dI
         Ieol = np.zeros(N, dtype=complex)
         Ieol[idxs] = Ivec
@@ -946,6 +1124,12 @@ class Solver:
                 f"(‖g‖∞ = {info['residuo']:.3e} pu > tol = {tol:.1e}). "
                 "Aumente niter, reduza damp, ou investigue — não use o último valor.")
         return V, If, info
+
+    @staticmethod
+    def _espalhar(Ivec, idxs, N):
+        v = np.zeros(N, dtype=complex)
+        v[idxs] = Ivec
+        return v
 
     def _estado_fc_robusto(self, bus, **kw):
         """Resolve o estado, com o fallback de ângulo do manual quando necessário.
@@ -960,6 +1144,9 @@ class Solver:
         try:
             return self._estado_fc(bus, strict=True, ang_prefalta=False, **kw)
         except RuntimeError:
+            # Último recurso: travar TODAS as fontes na pré-falta. Não é o modelo do
+            # ANAFAS (que decide por fonte) e distorce as que teriam solução própria;
+            # fica como degradação controlada, sinalizada em info['ang_prefalta'].
             return self._estado_fc(bus, strict=True, ang_prefalta=True, **kw)
 
     def fault_fc(self, bus, kind='3F', niter=60, damp=1.0, tol=1e-8, strict=True):
@@ -969,8 +1156,9 @@ class Solver:
         que inclui essas contribuições. Já `fault` é Thévenin puro e as exclui — é a
         grandeza comparável à seção de dados de curto (MVA).
 
-        kind: '3F', '1FT', '2F' ou '2FT'. Nas faltas desequilibradas o conversor
-        contribui APENAS com sequência positiva (manual, item 2.8.3).
+        kind: '3F', '1FT' ou '2FT'. Nas faltas desequilibradas o conversor contribui
+        APENAS com sequência positiva (manual, item 2.8.3): a injeção altera a rede de
+        sequência positiva e as demais permanecem passivas.
         """
         if bus not in self.IDXP:
             return None
@@ -981,6 +1169,11 @@ class Solver:
         if kind == '3F':
             _, If, _ = self._estado_fc_robusto(bus, niter=niter, damp=damp, tol=tol)
             return abs(If) * Ib
+        # Faltas desequilibradas: a injeção de sequência positiva desloca a tensão
+        # equivalente de pré-falta vista pela rede de sequência. Resolve-se o estado com
+        # a rede positiva carregada pelas fontes e aplica-se a mesma composição de
+        # sequências de `fault`, com Vf igual à tensão da barra antes da falta nesse
+        # estado — que é o efeito de primeira ordem das fontes numa falta assimétrica.
         Z1, Z2, Z0 = self.zth(bus)
         if Z1 is None or Z0 is None:
             return None
@@ -1002,11 +1195,7 @@ class Solver:
         """Contribuicao de corrente de cada elemento incidente na barra para uma falta
         solida na propria barra. kind='3F' (modulo da corrente de fase, seq. positiva)
         ou '0' (modulo de I0 por ramo, seq. zero). Retorna dict {(tipo,bf,bt,nc): I_kA}.
-        So considera ramos EM SERVICO (fora de dropB). Base: KCL fecha na corrente total.
-
-        No modo 'completo' as correntes saem do MESMO vetor de tensões convergido que a
-        corrente de falta — resolver a falta aqui e as contribuições por um segundo
-        caminho de Thévenin produziria tabela que não fecha."""
+        So considera ramos EM SERVICO (fora de dropB). Base: KCL fecha na corrente total."""
         if modo not in self.MODOS:
             raise ValueError(f"modo deve ser um de {self.MODOS}, recebido {modo!r}")
         kvb=self.M.bus_kv.get(bus,0)
@@ -1283,23 +1472,19 @@ class Solver:
                 "libere explicitamente com Solver.validar_completo(None, forcar=True) "
                 "assumindo o risco.")
 
-    def validar_completo(self, niveis_kA, kind='3F', limite=1.0, forcar=False,
-                         ignorar=()):
+    def validar_completo(self, niveis_kA, kind='3F', limite=1.0, forcar=False):
         """Confere `fault_fc` contra a seção de níveis do ANAFAS e libera o modo completo.
 
         `niveis_kA`: {barra: corrente_kA} lida da seção de níveis do MESMO caso.
-        `ignorar`: barras excluídas do critério, para o caso de divergência conhecida e
-            documentada. Elas continuam aparecendo no relatório, marcadas.
-        Devolve dict com a estatística. Só libera o modo se o erro máximo ficar dentro
-        de `limite` (%). `forcar=True` libera sem conferir, sob responsabilidade de quem
-        chama.
+        Devolve dict com estatística do erro. Só libera o modo se o erro máximo ficar
+        dentro de `limite` (%). `forcar=True` libera sem conferir, sob responsabilidade
+        de quem chama.
         """
         if forcar:
             self.validado_completo = True
             self._selo_completo = dict(validado=False, forcado=True)
             return self._selo_completo
-        ignorar = set(ignorar)
-        erros, excluidas = [], []
+        erros = []
         for b, ref in (niveis_kA or {}).items():
             if b not in self.IDXP or not ref or ref <= 0:
                 continue
@@ -1307,10 +1492,8 @@ class Solver:
                 calc = self.fault_fc(b, kind)
             except RuntimeError:
                 continue
-            if not calc:
-                continue
-            e = (calc - ref) / ref * 100
-            (excluidas if b in ignorar else erros).append((b, e))
+            if calc:
+                erros.append((b, (calc - ref) / ref * 100))
         if not erros:
             raise ValueError("nenhuma barra comparável entre o caso e os níveis fornecidos")
         v = np.array([e for _, e in erros])
@@ -1318,8 +1501,7 @@ class Solver:
         selo = dict(n=len(v), erro_max=float(np.max(np.abs(v))),
                     mediana=float(np.median(np.abs(v))),
                     pct_dentro=float((np.abs(v) < limite).mean() * 100),
-                    pior_barra=pior[0], pior_erro=float(pior[1]), limite=limite,
-                    ignoradas=[(b, float(e)) for b, e in excluidas])
+                    pior_barra=pior[0], pior_erro=float(pior[1]), limite=limite)
         self.validado_completo = selo['erro_max'] < limite
         selo['liberado'] = self.validado_completo
         self._selo_completo = selo

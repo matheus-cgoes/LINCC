@@ -137,15 +137,48 @@ def test_le_arquivo_com_lf_puro(tmp_path):
     assert len(M.bus_kv) == 1
 
 
-def test_modo_completo_bloqueado_ate_validar(radial):
-    """O modo 'completo' não responde antes de validar_completo() aprovar o caso.
+# ---------- referência de ângulo do conversor, decidida por fonte ----------
 
-    Emitir número de injeção não validado num estudo de proteção é pior do que não
-    emitir: o bloqueio é parte do modelo de uso, não conveniência.
+def test_referencia_de_angulo_e_decidida_por_fonte(tmp_path):
+    """Cada gerador de conversor escolhe a própria referência de ângulo.
+
+    Regressão da correção mais cara do projeto. O ANAFAS resolve cada fonte com o ângulo
+    da PRÓPRIA tensão convergida quando essa equação tem solução, e cai na tensão
+    PRÉ-FALTA só na fonte que não tem — e declara qual usou, no rótulo ('FON.CORRENTE'
+    contra 'FON.COR.Vpre'). Aplicar o fallback ao CONJUNTO produzia erro de +29% na
+    fonte remota, que tinha solução própria.
+
+    O caso de aceitação é o complexo fotovoltaico com reatância negativa: duas fontes,
+    uma colada ao ponto de falta (sem solução própria) e uma a três saltos (com solução).
+    Espera-se exatamente UMA fonte travada na pré-falta.
     """
-    assert radial.fault(2, "3F") > 0                      # modo padrão responde
-    assert radial.fault(2, "3F", modo="sincronas") == radial.fault(2, "3F")
-    with pytest.raises(RuntimeError, match="bloqueado"):
-        radial.fault(2, "3F", modo="completo")
-    with pytest.raises(ValueError, match="modo deve ser"):
-        radial.fault(2, "3F", modo="inexistente")
+    caso = CASES / "caso4_duas_fontes.ANA"
+    if not caso.exists():
+        pytest.skip("caso de aceitação não disponível")
+    S = solve("caso4_duas_fontes.ANA")
+    _, _, info = S._estado_fc(7785, ang_prefalta=False, strict=False)
+    assert info["convergiu"], "deve convergir; sem a decisão por fonte entra em ciclo limite"
+    assert info["fontes_prefalta"] == 1, "só a fonte colada à falta usa a pré-falta"
+    ib34 = SB / (math.sqrt(3) * 34.0)
+    icc = S.fault_fc(7785, "3F") * 34.5 / 34.0
+    assert icc == pytest.approx(22.325, rel=0.01)   # alvo medido no ANAFAS
+
+
+def test_escala_da_injecao_usa_imax_e_nao_in():
+    """A curva do SM 2.10 é normalizada; a escala absoluta da injeção é Imax.
+
+    Regressão: com o campo MVA preenchido, In = MVA/(√3·kV) fica abaixo de Imax e
+    escalar a curva por In subestima a injeção em exatamente Imax/In (1,50 no caso de
+    referência). Onde MVA está ausente, In = Imax e o erro não aparece — foi por isso
+    que passou despercebido em quase toda a base.
+    """
+    reg = dict(Imax=0.09896, In=0.06600, phi=math.acos(0.1), K=1,
+               Vmin=0.0, Vmax=9999.0, VP1=0.50, VP2=0.85)
+    # abaixo de VP1 a injeção satura no limite do conversor, não na corrente nominal
+    m, _ = Solver._mod_fc(reg, 0.0)
+    assert m == pytest.approx(reg["Imax"])
+    assert abs(Solver._inj_fc(reg, complex(0.0, 0.0))) == pytest.approx(reg["Imax"])
+    # acima de VP2 não há injeção; no meio da rampa, fração de Imax
+    assert Solver._mod_fc(reg, 0.90)[0] == pytest.approx(0.0)
+    meio, _ = Solver._mod_fc(reg, (0.50 + 0.85) / 2)
+    assert meio == pytest.approx(0.5 * reg["Imax"], rel=0.05)

@@ -25,7 +25,11 @@ class AnaModel:
     permitir contingências (filtragem) sem reparsear o arquivo."""
     def __init__(self, path):
         raw = open(path,'rb').read().decode('cp1252')
-        L = raw.split('\r\n')
+        # Arquivos .ANA nativos são CRLF, mas basta passarem por um sistema de controle de
+        # versão com normalização de fim de linha para virarem LF — e aí um split por
+        # '\r\n' devolve o arquivo inteiro numa única "linha", sem erro visível: o parser
+        # simplesmente não acha bloco nenhum. splitlines() aceita as duas formas.
+        L = raw.splitlines()
         self.bus_kv = {}
         self.bus_off = set()            # nb -> kV base
         self.bus_name = {}          # nb -> nome da barra
@@ -200,17 +204,40 @@ class AnaModel:
                 except: nunop = 1
                 self.shl.append(dict(bf=bf,bt=bt,term=term,Q=q,conn='YN',
                                      rn=rn,xn=xn,nunop=nunop))
-        # DEOL — fontes de corrente (não entram na Ybus)
+        # DEOL — geradores síncronos com conversor pleno: fontes de corrente de sequência
+        # positiva, NÃO entram na Ybus. Régua conforme manual do ANAFAS, apêndice A33-A34.
+        # Uma barra pode ter VÁRIOS registros (grupos NG distintos, modelos diferentes de
+        # aerogerador): a estrutura é lista por barra, e as injeções se somam.
         self.deol = {}
         if 'DEOL' in idx:
             i = idx['DEOL']+1; end = fim_de('DEOL')
             while i < end:
                 ln = L[i]; i += 1
-                if not ln or ln.startswith('(') or ln.strip()=='F': continue
+                if not ln or ln.startswith('(') or ln.strip() in ('F','99999'): continue
                 try: nb = int(ln[0:5])
                 except: continue
+                if len(ln) > 6 and ln[6:7].upper() == 'D':
+                    continue                    # gerador desligado: desconsiderado
+                def _f(a, b, dflt=None):
+                    v = _numf(ln[a:b]) if len(ln) > a else None
+                    return dflt if v is None else v
+                reg = dict(
+                    K      = int(ln[9:10]) if len(ln) > 9 and ln[9:10].strip().isdigit() else 0,
+                    NG     = _nunop(ln[14:16]) or 1,
+                    Pinic  = _f(17, 23),
+                    Imax_A = _f(23, 29),         # A rms, POR UNIDADE (manual: 3600 A x 25 = 90 kA)
+                    Vmin   = _f(29, 35, 0.0),    # pu; abaixo disso o gerador se desconecta
+                    fpcc   = _f(35, 41, 1.0),    # cos(phi_cc); SINAL é convenção: + indutivo
+                    nome   = ln[41:47].strip() if len(ln) > 41 else '',
+                    NUN    = _nunop(ln[48:51]) or 1,
+                    nunop  = _nunop(ln[51:54]) or _nunop(ln[48:51]) or 1,   # NOP em operação
+                    fppre  = _f(55, 61, 1.0),
+                    Vmax   = _f(62, 68, 9999.0),
+                    MVA    = _f(87, 92),
+                    VP1    = _f(133, 137, 0.50), # curva ΔIq×V+ (usada quando K=1)
+                    VP2    = _f(138, 142, 0.85),
+                )
                 self.eol.add(nb)
-                self.deol[nb]=dict(Imax_A=_numf(ln[23:30]),Vmin=_numf(ln[30:36]),
-                                   fpcc=_numf(ln[36:41]),Pinic=_numf(ln[17:23]),
-                                   nunop=_nunop(ln[51:54]) or _nunop(ln[47:51]))
+                self.deol.setdefault(nb, []).append(reg)
+
 

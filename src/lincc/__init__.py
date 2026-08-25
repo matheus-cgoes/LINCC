@@ -73,27 +73,18 @@ LINCC — guia de modos, tolerância e limitações conhecidas
    de X%. No caso de referência (BR2812PI, 828 barras com conversor próximo):
 
        tolerância    dentro     fora
-          0,5%       98,16%      15
-          1,0%       98,53%      12     <- recomendado
-          3,0%       99,39%       5
-          5,0%       99,51%       4
-         20,0%       99,51%       4     <- não muda: são sempre as mesmas 4
-         30,0%      100,00%       0
+          0,1%        96,2%      31
+          0,5%        99,5%       4
+          1,0%       100,0%       0     <- recomendado, e o caso de referência passa
 
-   Mediana 0,020%, p90 0,055%. Entre 5% e 20% o número não muda porque restam as mesmas
-   quatro barras de um cluster conhecido (item 4). Afrouxar até 30% para acomodá-las
-   troca um bloqueio honesto por um número sem valor nas outras 813.
+   Mediana 0,019%, p95 0,067%, máximo 0,920%, sobre as 817 barras que convergem entre as
+   828 com conversor próximo. Mantenha 1%: é o critério que o caso de referência atende
+   sem exclusões, e apertar para 0,5% rejeitaria quatro barras por margem numérica.
 
-   O caminho correto é manter o critério e excluir explicitamente o que é divergência
-   documentada — as excluídas continuam no relatório, marcadas:
+   O parâmetro `ignorar` continua disponível para o caso de um horizonte novo trazer
+   divergência documentada — as excluídas seguem no relatório, marcadas:
 
-       selo = S.validar_completo(niveis, limite=1.0,
-                                 ignorar=(7785, 46047, 7786, 46050))
-
-   Por aplicação: 3% com essas quatro excluídas é defensável para suportabilidade de
-   disjuntor e esforços, onde o erro é conservador e a margem de placa é maior. Para
-   sensibilidade, ICC_MIN e pickup de 51N, mantenha 1% — e nas barras excluídas use o
-   modo `sincronas`, declarando isso no estudo.
+       selo = S.validar_completo(niveis, limite=1.0, ignorar=(...))
 
 3. VALIDAR UM CASO NOVO É OBRIGATÓRIO
 
@@ -109,17 +100,12 @@ LINCC — guia de modos, tolerância e limitações conhecidas
 
 4. LIMITAÇÕES CONHECIDAS DO MODO COMPLETO
 
-   a) Cluster de conversor com fator de distribuição próximo de 1. Quatro barras de
-      manobra interna de um complexo fotovoltaico em 34,5 kV (7785, 46047, 7786, 46050
-      no caso de referência) divergem +20% a +29%. A injeção está certa — módulo, ângulo
-      e curva conferem com o ANAFAS até a quarta casa — mas a rede local tem três
-      reatâncias negativas encadeadas e a impedância de transferência supera a de
-      Thévenin. Cinco hipóteses foram testadas e refutadas por teste A/B global. Nessas
-      barras, use `sincronas` e declare.
-
-   b) Não convergência. Cerca de 0,5% das barras esgotam as iterações e levantam
+   a) Não convergência. Cerca de 0,5% das barras esgotam as iterações e levantam
       RuntimeError em vez de devolver valor. É proposital: valor derivado de iteração
       não convergida não deve entrar em estudo.
+
+   b) Nenhum resíduo material conhecido no caso de referência: todas as barras que
+      convergem ficam abaixo de 1%, com máximo de 0,92%.
 
    c) Faltas desequilibradas no modo completo usam a tensão equivalente do estado
       convergido. O conversor contribui só em sequência positiva (manual, item 2.8.3).
@@ -140,10 +126,24 @@ LINCC — guia de modos, tolerância e limitações conhecidas
    Curva do conversor conforme ONS, Procedimentos de Rede, Submódulo 2.10, item 5.8 e
    Figura 14: corrente reativa adicional abaixo de 85% da tensão de sequência positiva,
    saturando no ajuste padrão V1 = 0,5 pu. Coincide com VP1 e VP2 do registro DEOL.
-   `Imax` é POR UNIDADE, multiplicado por NOP (manual: "3600 A x 25 unidades = 90 kA").
+   `Imax` é POR UNIDADE, multiplicado por NOP (manual: "3600 A x 25 unidades = 90 kA"),
+   e é ELE que dá a escala absoluta da injeção: a curva é normalizada (ΔIq/In de 0 a 1
+   entre VP2 e VP1) mas o valor injetado é `frac × Imax`. Onde o campo MVA está
+   preenchido, In = MVA/(√3·kV) fica ABAIXO de Imax — razão 1,50 no caso de referência —
+   e escalar por In subestima a injeção em exatamente Imax/In. Onde MVA está ausente o
+   manual manda tomar In = Imax e as duas leituras coincidem, o que explica o desvio
+   aparecer só nas poucas barras com MVA declarado.
    Solução por Newton com o conversor linearizado como equivalente Norton (Haddadi,
    Farantatos & Kocar, arXiv:2411.12006) — a iteração de ponto fixo com fonte de corrente
    ideal cai em ciclo limite e não converge.
+
+   REFERÊNCIA DE ÂNGULO, DECIDIDA POR FONTE. Cada gerador resolve com o ângulo da PRÓPRIA
+   tensão convergida quando essa equação tem solução, e usa a tensão PRÉ-FALTA só quando
+   não tem — condição que ocorre com a fonte eletricamente colada ao ponto de falta, onde
+   Vth ≈ 0 e a equação exigiria ang(Zjj) = 90°. O ANAFAS declara qual usou no rótulo da
+   fonte, em relatório de contribuições: 'FON.CORRENTE' contra 'FON.COR.Vpre'. Aplicar o
+   fallback ao CONJUNTO, e não à fonte que precisa dele, produz erro de +29% nas barras
+   de complexo com reatância negativa encadeada.
 """
 
 

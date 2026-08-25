@@ -1,0 +1,11 @@
+# Casos .ANA são de colunas fixas e o parser depende dos bytes exatos. Sem isto, o git
+# normaliza CRLF para LF ao clonar em outra plataforma e os casos de teste deixam de ser
+# lidos — falha silenciosa, sem erro de sintaxe.
+*.ANA -text
+*.LST -text
+
+# Código e documentação seguem a normalização padrão.
+*.py text
+*.md text
+*.toml text
+*.yml text
