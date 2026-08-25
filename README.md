@@ -1,285 +1,68 @@
 # LINCC — Linguagem Natural em Curto-Circuito
 
-Motor de curto-circuito para sistemas de transmissão, em Python. Lê casos em formato `.ANA`, monta as
-redes de sequência positiva e zero e calcula equivalentes de Thévenin, correntes de falta e grandezas
-de apoio a estudos de proteção por fatoração LU esparsa.
+Motor de curto-circuito para sistemas de transmissão, em Python. Lê casos em formato `.ANA`,
+monta as redes de sequência positiva e zero e calcula equivalentes de Thévenin, correntes de
+falta e grandezas de apoio a estudos de proteção por fatoração LU esparsa.
 
-O projeto nasceu de um experimento de método: **o motor foi construído e depurado inteiramente por
-diálogo em linguagem natural com um agente de IA**, sob uma regra fixa — nenhum número vem do modelo de
-linguagem. Todo valor sai de álgebra linear determinística e auditável; o agente decide o que calcular,
-diagnostica divergências e propõe correções, que só são aceitas após validação contra a referência
-oficial do setor. A validação final foi barra a barra, nas 15,6 mil barras de um caso real de
-planejamento, com critério de erro individual — não erro médio.
-
-> **Não substitui ferramenta homologada.** O papel normativo dos programas oficiais do setor permanece
-> integralmente. Este motor serve como segundo caminho de cálculo — útil justamente porque tem origem
-> independente — e como base de automação. Leia a
-> [isenção de responsabilidade](#isenção-de-responsabilidade) antes de qualquer uso.
-
----
-
-## Estado da validação
-
-Contra a seção de **alta precisão** do relatório (impedâncias de barra, 10 decimais):
+Validado barra a barra contra o ANAFAS, com critério de erro **individual** por barra abaixo
+de 1% — não erro médio.
 
 | Métrica (caso de referência, 15.627 barras) | Resultado |
 |---|---|
-| Sequência positiva, erro individual por barra < 1% | **100,000%** das barras (mediana 0,0000%) |
-| Sequência zero, erro individual por barra < 1% | **99,992%** das barras (mediana 0,0000%) |
-| Níveis em MVA — trifásico e bifásico-terra | 100,000% < 1% |
+| Sequência positiva, erro por barra < 1% | 100,000% (mediana 0,0000%) |
+| Sequência zero, erro por barra < 1% | 99,992% (mediana 0,0000%) |
+| Níveis com geração por conversor, 828 barras | 100,000% < 1% (mediana 0,019%) |
 
-Medido contra a seção de 4 decimais em pu, o mesmo motor dá 99,4% e 98,8%: a diferença é quantização
-do relatório, não erro do solver. Sobre impedância pequena, o arredondamento sozinho já excede 1%.
-
-O critério de aceitação é **erro individual por barra**. A média geral baixa é fácil de obter e não
-serve: basta que a barra errada seja justamente a do vão em estudo.
-
-Resíduo conhecido: barras de fronteira internacional, cujo valor depende do equivalente de rede
-externo, e erros relativos elevados sobre valores absolutos ínfimos — que são quantização do relatório
-de referência, não do solver.
-
-## Instalação
-
-```bash
-git clone https://github.com/<usuario>/lincc.git
-cd lincc
-pip install -e .
-```
-
-Python 3.10+. Dependências: `numpy`, `scipy`. Para rodar os testes: `pip install -e ".[dev]"`.
+> **Não substitui ferramenta homologada.** Serve como segundo caminho de cálculo — útil
+> justamente por ter origem independente — e como base de automação. Resultados de
+> curto-circuito têm consequência sobre dimensionamento e ajuste de proteção: qualquer uso
+> real exige verificação por profissional habilitado. Ver [`docs/uso.md`](docs/uso.md).
 
 ---
 
-## Componentes
+## Uso com agente de IA
 
-Quatro módulos, cada um correspondendo a um estágio do pipeline.
+O LINCC foi feito para ser operado por conversa: você anexa o motor e o caso, descreve o
+estudo em português, e o agente escreve o código que chama a API. Nada é calculado pelo
+modelo de linguagem — todo número sai do motor.
 
-```
-      arquivo .ANA
-           |
-           v
-   +------------------+
-   |  _base.py        |  escala numerica, sentinelas de infinito, 3*Zn
-   |  helpers         |
-   +--------+---------+
-            v
-   +------------------+
-   |  model.py        |  AnaModel: colunas fixas -> objetos de rede
-   |  parser          |  (barras, ramos, geradores, shunts, mutuas, reatores)
-   +--------+---------+
-            v
-   +------------------+
-   |  solver.py       |  Solver: Ybus seq+ e seq0 -> LU -> Zbus sob demanda
-   |  Ybus + LU       |  faltas, contingencia, grandezas de protecao
-   +--------+---------+
-            v
-   +------------------+
-   |  __init__.py     |  API publica
-   +------------------+
-```
+**Anexe dois arquivos** e cole o prompt abaixo:
 
-### `_base.py` — helpers de leitura e conversão
+- `lincc_bundle.py` — o motor inteiro em um arquivo, sem instalação (está na raiz deste
+  repositório; regenere com `python ferramentas/gerar_bundle.py`)
+- o seu caso `.ANA`
 
-Regras numéricas do formato, isoladas para poderem ser testadas sozinhas.
-
-| Função | O que faz |
-|---|---|
-| `num(s)` | Campo do arquivo para float. **Campo com ponto decimal vale direto; sem ponto, vale valor/100** (percentual com duas casas implícitas). `999999` e notação científica representam infinito |
-| `zfin(r, x)` | Impedância complexa, retornando `None` quando qualquer parte é infinita (ramo aberto) |
-| `zn3(rn, xn)` | Impedância de aterramento de neutro referida à sequência zero: `3·Zn` |
-| `_nunop(s)` (interno) | Número de unidades **operativas**, de um campo que declara instaladas e operativas |
-| `SB` | Potência base, 100 MVA |
-
-### `model.py` — `AnaModel`, o parser
-
-Lê o arquivo de colunas fixas e produz as coleções de rede. Não faz cálculo elétrico.
-
-```python
-M = AnaModel("caso.ANA")
-
-M.bus_kv      # {barra: tensão base}          M.bus_name  # {barra: nome}
-M.bus_off     # barras marcadas como desligadas (removidas do caso)
-M.branches    # ramos: L linha, T trafo, S cap. série (com conexões e aterramentos)
-M.gens        # geradores síncronos           M.eol   # geração por inversor
-M.shunts      # shunts de barra               M.zig   # transformadores de aterramento
-M.svc         # compensadores estáticos       M.shl   # reatores / shunts de linha
-M.mutuas      # acoplamentos de sequência zero entre trechos parciais
-M.caps        # capacitores série
-```
-
-Pontos do formato que o parser trata e que costumam passar despercebidos: sentinela de fim de bloco
-(`99999`, que não é barra elétrica), estado de equipamento (`CE = D` significa fora de serviço), número
-de unidades operativas, e dependência do **lado** do registro para conexão e aterramento. Detalhe em
-[`docs/formato-ana.md`](docs/formato-ana.md).
-
-### `solver.py` — `Solver`, a Ybus e o cálculo
-
-Monta as duas redes de sequência, fatora e responde consultas.
-
-```python
-S = Solver(M)
-S.factor()          # fatoração LU — obrigatório antes de qualquer consulta
-```
-
-Atributos úteis após `factor()`: `S.YP` e `S.Y0` (matrizes esparsas), `S.IDXP` e `S.I0P`
-(barra para índice), `S.luP` e `S.lu0` (fatorações).
-
-### `__init__.py` — API pública
-
-```python
-from lincc import AnaModel, Solver, branches_at, recomposicao_87b
-```
-
-### `examples/validar_caso.py` — validação de um caso novo
-
-Script de linha de comando, o passo obrigatório antes de usar um caso que ainda não foi validado:
-
-```bash
-python examples/validar_caso.py CASO.ANA RELATORIO.LST
-```
-
-Compara barra a barra contra o relatório da ferramenta de referência para o mesmo caso e lista as barras
-acima do critério. Aceita `--limite`, `--piores` e `--com-deol`; retorna 0 se todas as comparações
-decisivas passam.
-
-Documentação completa dos dois scripts — argumentos, quais relatórios exportar do ANAFAS e como
-interpretar o resultado: [`docs/scripts.md`](docs/scripts.md).
-
-### `ferramentas/gerar_bundle.py` — versão de arquivo único
-
-Concatena o pacote em um `lincc_bundle.py` autocontido, para rodar sem instalar nada ou anexar em uma
-sessão de trabalho:
-
-```bash
-python ferramentas/gerar_bundle.py
-python -c "from lincc_bundle import AnaModel, Solver; print('ok')"
-```
-
-Sempre corrija no pacote e regenere — nunca o contrário. O bundle é versionado na raiz para poder ser
-baixado sem clonar; o CI reprova se ele divergir do pacote, então regenere e inclua no mesmo commit.
-
-### Árvore
+Para validar um caso ainda não conferido, anexe também os relatórios do ANAFAS: o de
+**impedâncias de barra** e o de **níveis de curto-circuito**.
 
 ```
-src/lincc/        _base.py  model.py  solver.py  __init__.py
-tests/            test_casos_sinteticos.py + cases/ (3 casos sintéticos + ESPERADO.md)
-examples/         validar_caso.py
-ferramentas/      gerar_bundle.py
-docs/             formato-ana.md  mutuas.md  validacao.md  scripts.md
-lincc_bundle.py   motor em arquivo único, gerado do pacote (para anexar em sessão de chat)
-```
+Anexei o lincc_bundle.py (motor de curto-circuito validado contra o ANAFAS) e um caso .ANA.
 
----
-
-## Uso
-
-### Com agentes de IA
-
-O LINCC foi feito para ser operado por conversa: você anexa o motor e o caso, descreve o estudo em
-português, e o agente escreve o código que chama a API. Nada é calculado pelo modelo de linguagem —
-todo número sai do motor.
-
-#### O que anexar
-
-| Arquivo | Quando |
-|---|---|
-| `lincc_bundle.py` | sempre — é o motor inteiro em um arquivo, sem instalação |
-| `CASO.ANA` | sempre |
-| Relatórios do ANAFAS | só para validar um caso ainda não validado — ver abaixo |
-
-Gere o `lincc_bundle.py` com `python ferramentas/gerar_bundle.py`, ou baixe-o direto da raiz do
-repositório — ele é versionado, e o CI garante que está sincronizado com o pacote.
-
-Quais relatórios exportar do ANAFAS, em ordem de importância:
-
-| Relatório | Papel |
-|---|---|
-| **Impedâncias de barra** | Indispensável. Z₁, Z₀ e (Z₀+Z₂) com 10 decimais — o gabarito de verdade. Dele se derivam os três níveis |
-| **Níveis de curto-circuito** | Indispensável para validar `fault_fc`: é o único que inclui a contribuição dos conversores |
-| Dados de curto-circuito | Dispensável. Repete Z com 4 decimais e traz MVA já derivável dos outros dois |
-
-Exporte sempre o de impedâncias de barra, mesmo quando o estudo pedir só níveis: é ele que permite
-separar erro de cálculo de arredondamento de relatório.
-
-#### Prompt para usar
-
-Para análise em caso já validado. É o uso normal.
-
-```
-Anexei o lincc_bundle.py (motor de curto-circuito) e um caso .ANA.
-
-O motor é a fonte de verdade: importe e use, não recrie de memória, não reescreva a modelagem.
+O motor é a fonte de verdade: importe e use, não recrie de memória, não reescreva a
+modelagem.
 
     import sys; sys.path.insert(0, '.')
-    from lincc_bundle import AnaModel, Solver, branches_at, recomposicao_87b
+    from lincc import AnaModel, Solver, branches_at, recomposicao_87b
     M = AnaModel("CASO.ANA");  S = Solver(M);  S.factor()
 
-Correntes saem em kA primários. Consulte as docstrings para a API completa e para os limites de
-cada método.
+Correntes saem em kA primários. Chame lincc.orientacao() para o guia de modos, tolerância
+e limitações, e consulte as docstrings para a API completa.
 
-Duas regras de cálculo:
-- S.fault() é Thévenin puro e NÃO inclui geradores conectados por conversor (eólicos e
-  fotovoltaicos, registros DEOL). Para nível de curto destinado a dimensionamento de equipamento
-  ou ajuste de proteção, use S.fault_fc(), que os inclui. Perto dessas usinas a diferença passa
-  de 40%.
-- Elos HVDC back-to-back são bloqueados: não há caminho de curto entre os dois lados da
-  conversora. Isso é modelagem, não omissão.
-
-Se faltar dado (relação de TC, ajuste de IED, placa de equipamento, capacidade de interrupção),
-diga o que falta em vez de estimar.
+Se faltar dado (relação de TC, ajuste de IED, placa, capacidade de interrupção), diga o
+que falta em vez de estimar.
 
 O que eu preciso: <descreva o estudo>
 ```
 
-#### Prompt para validar um caso novo
+O motor avisa sozinho, ao fatorar, quando o caso tem geração por conversor e o que fazer
+a respeito. Detalhes de operação, validação de caso novo e escolha de tolerância estão em
+[`docs/uso.md`](docs/uso.md).
 
-Todo caso que você ainda não conferiu passa por aqui antes de virar estudo. O parser lê o formato,
-não um caso específico — mas um tipo de registro que não apareça no caso de referência é ignorado
-em silêncio, e o número sai errado sem nenhum aviso.
+---
 
-```
-Anexei o lincc_bundle.py, um caso .ANA e o relatório do ANAFAS para o MESMO caso.
+## Exemplos
 
-Valide o motor contra o relatório, barra a barra. Critério: erro INDIVIDUAL por barra abaixo de 1%
-em Z1 e Z0 — não erro médio, não faixa de 5%.
-
-1. Rode o motor sobre o .ANA e fatore.
-2. Extraia o gabarito do relatório. Meça as colunas no próprio arquivo antes de confiar em
-   qualquer régua: cada seção tem a sua. Duas armadilhas conhecidas:
-   - o cabeçalho do relatório de níveis é ACENTUADO ("RELATÓRIO DE NÍVEIS"); delimitar seção
-     procurando só por "RELATORIO" faz a leitura atravessar para dentro dele;
-   - valor mais largo que a coluna invade o campo anterior, e a leitura por coluna fixa perde o
-     dígito inicial.
-3. Compare por barra. Reporte %<1%, %<5%, mediana e estratificação por classe de tensão.
-4. Só então investigue as barras acima de 1%, uma a uma: localize o elemento por
-   I_terra = rowsum(Y0)·V, confirme no registro cru do .ANA, e valide qualquer correção medindo o
-   %<1% sobre TODA a rede — nunca sobre a barra alvo.
-
-Compare cada grandeza com a seção certa:
-- Z1 e Z0            → "RELATORIO DE IMPEDANCIAS DE BARRA" (10 decimais). É o gabarito de verdade.
-- S.fault (kA)       → "RELATORIO DE DADOS DE CURTO-CIRCUITO" (MVA), que exclui os conversores.
-- S.fault_fc (kA)    → "RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO" (kA), que os inclui.
-Comparar fault() com a seção de níveis reprova função correta.
-
-A seção de dados tem 4 decimais em pu: sobre impedância pequena, o arredondamento sozinho produz
-erro relativo aparente acima de 1%. Julgue pela seção de alta precisão.
-
-Não declare sucesso antes de bater contra o gabarito deste caso.
-```
-
-Se preferir não depender do agente para isso, o repositório traz o mesmo procedimento pronto:
-
-```bash
-python examples/validar_caso.py CASO.ANA RELATORIO.LST
-```
-
-#### Depois da inicialização
-
-O chat fica pronto para pedidos em linguagem natural: evolução de curto pela entrada de um
-equipamento, varredura N-1, insumos de seletividade, corrente mínima de recomposição para 87B.
-Descrever a aplicação e o critério do seu estudo melhora bastante o resultado.
-
-### Grandezas básicas
+### Corrente de falta
 
 ```python
 from lincc import AnaModel, Solver
@@ -287,170 +70,78 @@ from lincc import AnaModel, Solver
 M = AnaModel("caso.ANA")
 S = Solver(M); S.factor()
 
-S.fault(BARRA, "3F")     # corrente de falta em kA primários, na base de tensão da barra
-S.zth(BARRA)             # (Z1, Z2, Z0) em pu, base 100 MVA
+S.fault(BARRA, "3F")      # trifásica, em kA primários
+S.fault(BARRA, "1FT")     # fase-terra
+S.zth(BARRA)              # (Z1, Z2, Z0) em pu, base 100 MVA
 ```
 
-`kind` aceita `"3F"` (trifásica), `"1FT"` (fase-terra), `"2F"` (bifásica) e `"2FT"`.
-
-### Contingência: remoção de equipamento
-
-Um banco de transformadores de três enrolamentos é modelado por nó-estrela fictício, então removê-lo
-significa remover as **duas** pernas:
+O modo padrão inclui a contribuição de eólicas e fotovoltaicas conectadas por conversor.
+Num caso que as tenha, libere-o antes conferindo contra o próprio caso:
 
 ```python
-S = Solver(M, drop_branches=[(BARRA_AT, NO_ESTRELA, "3"),
-                             (BARRA_BT, NO_ESTRELA, "3")])
-S.factor()
+S.validar_completo(niveis_kA, limite=1.0)     # {barra: corrente_kA} do relatório
 ```
 
-O identificador de circuito (`nc`) é **string**. Para geradores: `drop_gens=[barra, ...]`.
-`branches_at(M, barra)` lista os ramos incidentes, útil para montar varreduras N-1.
+Para o Thévenin puro, sem essas fontes: `S.fault(BARRA, "3F", modo="sincronas")`.
 
-Comparar o caso com e sem um equipamento novo dá a evolução de curto que dispara revisão de estudos de
-proteção — envelope máximo em N-0 e mínimo sob N-1.
-
-### Grandezas de apoio a estudos de proteção
-
-| Método | Para que serve |
-|---|---|
-| `contribution(barra, kind)` | Passa-através por elemento incidente (87T), direto e reverso. A soma fecha por KCL com a corrente total |
-| `branch_current(fbus, bf, bt, nc, kind)` | Corrente em **qualquer** ramo para falta em qualquer barra — incidente, remoto ou linha arbitrária |
-| `bus_voltage(fbus, obus, kind)` | Tensões no relé, para impedância aparente de distância. Mútuas e capacitor série já estão na Ybus, logo sub e sobrealcance aparecem no resultado |
-| `line_end_open(bf, bt, nc, closed, kind)` | Corrente no terminal fechado com o remoto aberto (abertura sequencial de disjuntor) |
-| `fault_on_branch(bf, bt, nc, p, kind)` | Falta intermediária a fração `p` de um ramo série, por nó de falta paramétrico. Retorna a corrente na falta e em cada terminal |
-| `fault_on_shunt(barra, p, kind)` | Falta intermediária em reator shunt — sensibilidade do diferencial do reator |
-| `winding_ground_fault(barra, Zw, n)` | Curva de triagem de falta à terra em enrolamento (87REF) |
-| `recomposicao_87b(M, barra)` | Corrente mínima com a barra energizada por um só elemento, para cada elemento energizante — o piso de sensibilidade do 87B |
-
-Exemplo, falta na barra de baixa e o que o banco enxerga:
+### Evolução de curto pela entrada de um equipamento
 
 ```python
-S.fault(BARRA_BT, "1FT")                                       # corrente total na barra
-S.contribution(BARRA_BT, "1FT")                                # parcela de cada elemento
-S.branch_current(BARRA_BT, BARRA_BT, NO_ESTRELA, "3", "1FT")   # passa-através do banco
+# banco de três enrolamentos: remover as duas pernas do nó-estrela
+S_sem = Solver(M, drop_branches=[(BARRA_AT, NO_ESTRELA, "3"),
+                                 (BARRA_BT, NO_ESTRELA, "3")])
+S_sem.factor()
+
+delta = (S.fault(BARRA, "3F") - S_sem.fault(BARRA, "3F")) / S_sem.fault(BARRA, "3F")
 ```
 
-Exemplo, piso do 87B na recomposição:
+### Insumos de proteção
 
 ```python
-tabela, icc_min = recomposicao_87b(M, BARRA)
-# tabela: corrente por elemento energizante; icc_min: o governante, por tipo de falta
+S.contribution(BARRA, "3F")                      # passa-através por elemento (87T)
+S.branch_current(FBUS, BF, BT, NC, "3F")         # corrente em qualquer ramo
+S.line_end_open(BF, BT, NC, FECHADO, "3F")       # terminal fechado, remoto aberto
+S.fault_on_branch(BF, BT, NC, 0.8, "1FT")        # falta a 80% da linha
+recomposicao_87b(M, BARRA)                       # ICC_MIN por elemento energizante
 ```
 
-### Limites de cada método
+### Validar um caso novo
 
-Estão nas docstrings, e dois merecem destaque aqui:
+```bash
+python examples/validar_caso.py CASO.ANA RELATORIO.LST
+```
 
-- **Falta intermediária em linha com acoplamento mútuo é aproximada** — a mútua não é resegmentada. O
-  retorno traz `mutua_aprox` sinalizando a condição.
-- **`winding_ground_fault` assume enrolamento uniforme** (FEM proporcional a `x`, impedância da seção
-  proporcional a `x²`). A **forma** da curva é confiável e localiza a região crítica de sensibilidade;
-  os valores absolutos dependem da impedância de placa e da hipótese. Ancore ao terminal rigoroso via
-  `fault(barra, "1FT")`. Falta interna rigorosa exige a distribuição de espiras do fabricante.
-
-Sem relação de TC, todas as correntes são **primárias**. Ao dispor dos TCs, refira ao secundário pela
-relação e adote como corrente de base do estudo a nominal primária do TC — não a nominal do equipamento
-protegido.
+Compara barra a barra contra o relatório do ANAFAS e lista o que passa do critério.
+Retorna 0 se todas as comparações decisivas passam.
 
 ---
 
-## Metodologia de validação
-
-Duas regras, e a segunda é a que evita autoengano. Detalhe em
-[`docs/validacao.md`](docs/validacao.md).
-
-**Diagnóstico por corrente de terra nodal.** Quando uma barra excede o critério, a pergunta é física,
-não estatística: por onde a corrente homopolar está escoando indevidamente?
-
-```
-V = Y0^-1 · e_k
-I_terra = rowsum(Y0) · V
-```
-
-Os nós de maior magnitude apontam o elemento espúrio — shunt contado duas vezes, reator que deveria
-estar desligado, caminho de terra criado por erro de leitura de coluna. Cada divergência numérica vira
-uma hipótese verificável no registro cru do arquivo.
-
-**Teste A/B global.** Toda hipótese é aplicada, o modelo reconstruído e o resultado medido pelo
-percentual de barras abaixo de 1% em **toda** a rede — nunca na barra que motivou a investigação.
-Correção que melhora uma barra e degrada centenas é rejeitada, ainda que a teoria pareça favorecê-la.
-Sem essa regra, cada ajuste individual é sobreajuste ao caso de teste: o motor acerta o gabarito e erra
-o próximo caso.
-
-### Por que LU esparsa e não a inversa
-
-O equivalente de Thévenin de cada barra é a diagonal de `Zbus = Y^-1`. Para 15,6 mil barras, `Y^-1` é
-densa — da ordem de 2,4×10⁸ elementos complexos — enquanto `Y` tem cerca de 1,3×10⁵ não nulos.
-Fatora-se `Y` uma vez, com ordenação que preserva esparsidade, e obtém-se cada coluna sob demanda
-resolvendo dois sistemas triangulares para o vetor canônico:
-
-```
-Z_th,k = ek^T · Y^-1 · ek
-```
-
-O custo por barra é proporcional aos não nulos dos fatores, não a `n²`. É o método de vetores esparsos
-(Tinney, Brandwajn e Chan, 1985), o mesmo fundamento das ferramentas do setor. A fatoração também é a
-base natural das correntes de falta e da análise de contingências.
-
-## Testes
+## Instalação
 
 ```bash
+git clone https://github.com/matheus-cgoes/LINCC.git
+cd LINCC
+pip install -e ".[dev]"
 pytest -q
 ```
 
-Os testes usam **casos sintéticos** — redes pequenas, sem qualquer dado de terceiro, com resultado
-deduzido analiticamente em [`tests/cases/ESPERADO.md`](tests/cases/ESPERADO.md):
+Python 3.10+. Dependências: `numpy`, `scipy`.
 
-- `caso1_radial.ANA` — gerador aterrado, linha e transformador YN-D. Verifica a topologia de sequência
-  zero criada pelo delta: `Z0 = (0,30 + 0,05) ∥ 0,08 = j0,0651163 pu`.
-- `caso2_mutuas.ANA` — duas linhas paralelas acopladas. Verifica a matriz primitiva de grupo
-  (`Zeq = (Z0 + Zm)/2`) e funciona como **teste de regressão** do erro de identidade de segmento: se a
-  chave do segmento ignorar o número do circuito, a mútua é descartada e `Z0` cai 20% sem lançar
-  exceção alguma.
+## Documentação
 
-## Dados
-
-**Este repositório não contém casos de rede reais.** Bases de planejamento, relatórios de ferramentas
-licenciadas e dados operativos de instalações não são redistribuídos aqui. Se você tem acesso legítimo
-a um caso real, valide localmente — mas não o inclua em pull request. O `.gitignore` bloqueia as
-extensões correspondentes.
-
-## Isenção de responsabilidade
-
-Software distribuído "no estado em que se encontra", sem garantias, nos termos da licença. Resultados de
-curto-circuito têm consequência direta sobre dimensionamento de equipamento, ajuste de proteção e
-segurança de pessoas e instalações. Qualquer uso em aplicação real exige verificação independente por
-profissional habilitado, contra ferramenta reconhecida e contra os dados de placa do projeto. Os autores
-e contribuidores não respondem por decisões de engenharia tomadas a partir destas saídas.
-
-## Marcas e interoperabilidade
-
-`ANAFAS` é programa e marca de terceiro (CEPEL), citado aqui de forma nominativa apenas para identificar
-o formato de arquivo lido e a referência utilizada em validação. Este projeto não é afiliado,
-patrocinado nem endossado pelo CEPEL. Nenhum código daquele programa foi utilizado, inspecionado ou
-descompilado: o motor foi escrito a partir da teoria clássica de componentes simétricas e análise nodal,
-e a leitura do formato tem finalidade exclusiva de interoperabilidade.
-
-## Titularidade e independência
-
-Projeto pessoal, desenvolvido fora da jornada de trabalho, com recursos próprios do autor e sem
-utilização de infraestrutura, dados ou informação de qualquer empregador — hipótese do art. 4º, §2º, da
-Lei 9.609/98, em que a titularidade é exclusiva do desenvolvedor. O projeto não representa a posição de
-nenhuma instituição nem foi produzido no âmbito de atividade funcional.
+| Documento | Conteúdo |
+|---|---|
+| [`docs/uso.md`](docs/uso.md) | Operação, modos, tolerância, limitações e API completa |
+| [`docs/formato-ana.md`](docs/formato-ana.md) | Réguas de coluna e convenções do formato `.ANA` |
+| [`docs/mutuas.md`](docs/mutuas.md) | Acoplamento mútuo de sequência zero |
+| [`docs/validacao.md`](docs/validacao.md) | Metodologia de validação e histórico de correções |
+| [`docs/scripts.md`](docs/scripts.md) | Os dois scripts auxiliares |
 
 ## Licença
 
-Apache License 2.0 — veja [LICENSE](LICENSE).
+Apache License 2.0 — veja [LICENSE](LICENSE). `ANAFAS` é programa e marca do CEPEL, citado
+de forma nominativa apenas para identificar o formato lido e a referência de validação.
+Este projeto não é afiliado, patrocinado nem endossado pelo CEPEL, e não contém, utiliza
+ou deriva de código daquele programa.
 
-## Citação
-
-```bibtex
-@software{lincc,
-  title  = {LINCC: motor de curto-circuito construído por linguagem natural,
-            com validação barra a barra},
-  author = {Góes, Matheus Cassiano de},
-  year   = {2026},
-  url    = {https://github.com/<usuario>/lincc}
-}
-```
+Projeto pessoal, desenvolvido fora da jornada de trabalho e com recursos próprios do autor.

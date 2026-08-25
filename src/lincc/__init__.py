@@ -12,12 +12,12 @@ LEIA ANTES DE USAR — dois modos, e a escolha muda o resultado
 
     M = AnaModel("caso.ANA");  S = Solver(M);  S.factor()
 
-    S.fault(bus, kind)                     modo 'sincronas' (padrão)
-    S.fault(bus, kind, modo='completo')    inclui geradores de conversor pleno
+    S.fault(bus, kind)                     modo 'completo' (PADRÃO)
+    S.fault(bus, kind, modo='sincronas')   Thévenin puro, sem conversores
 
-`sincronas` é Thévenin puro da Ybus e NÃO inclui eólicas e fotovoltaicas conectadas por
-conversor (bloco DEOL). `completo` inclui. Perto dessas usinas a diferença passa de 40% —
-não é refinamento, é outra resposta.
+`completo` inclui as eólicas e fotovoltaicas conectadas por conversor (bloco DEOL) e é o
+padrão, por ser o número regulatório. `sincronas` é o Thévenin puro da Ybus e as exclui.
+Perto dessas usinas a diferença passa de 40% — não é refinamento, é outra resposta.
 
 Cada modo tem uma âncora de validação distinta no relatório do ANAFAS. Confundi-las é o
 erro mais comum e reprova função que está correta:
@@ -36,7 +36,8 @@ QUAL USAR
                não é fonte confiável em curto sustentado, e o mínimo com inversores pode
                ser maior ou menor conforme o afundamento. Assumir só um lado é que é erro.
 
-O modo `completo` vem BLOQUEADO. Libere validando contra o próprio caso:
+Num caso COM registros DEOL, o modo completo vem BLOQUEADO até ser conferido contra o
+próprio caso. Num caso sem DEOL, os dois modos coincidem e nada precisa ser validado.
 
     selo = S.validar_completo(niveis_kA, limite=1.0)     # {barra: corrente_kA}
 
@@ -58,8 +59,8 @@ LINCC — guia de modos, tolerância e limitações conhecidas
 
 1. OS DOIS MODOS
 
-   S.fault(bus, kind)                    'sincronas': Thévenin puro, SEM conversores.
-   S.fault(bus, kind, modo='completo')   inclui as injeções do bloco DEOL.
+   S.fault(bus, kind)                    'completo' (PADRÃO): inclui o bloco DEOL.
+   S.fault(bus, kind, modo='sincronas')  Thévenin puro, SEM conversores.
 
    Validar cada um contra a seção certa do relatório do ANAFAS:
        sincronas -> 'RELATORIO DE DADOS DE CURTO-CIRCUITO'   (MVA)

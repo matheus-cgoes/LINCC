@@ -669,11 +669,12 @@ class Solver:
             print(
                 f"\n[LINCC] Este caso tem {n} geradores de conversor pleno (bloco DEOL) em "
                 f"{len(self.M.deol)} barras.\n"
-                "        Perto deles, incluir ou não essa contribuição muda a corrente em "
-                "mais de 40%.\n"
-                "        fault(bus, kind)                    -> Thévenin puro, SEM conversores\n"
-                "        fault(bus, kind, modo='completo')   -> COM conversores (exige validar)\n"
-                "        Chame lincc.orientacao() para o guia de modos, tolerância e limitações."
+                "        O modo PADRÃO ('completo') inclui a contribuição deles e precisa ser\n"
+                "        liberado contra o próprio caso:\n"
+                "            S.validar_completo(niveis_kA, limite=1.0)\n"
+                "        onde niveis_kA vem do 'RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO'.\n"
+                "        Para o Thévenin puro, sem essas fontes: fault(bus, kind, modo='sincronas').\n"
+                "        Guia completo em lincc.orientacao()."
             )
 
     def zth(self, bus):
@@ -687,13 +688,18 @@ class Solver:
         else: Z0=None
         return Z1,Z2,Z0
 
-    def fault(self, bus, kind='3F', Zf=0.0, Vf=1.0, modo='sincronas'):
+    def fault(self, bus, kind='3F', Zf=0.0, Vf=1.0, modo='completo'):
         """kind: '3F','1FT','2F','2FT'. Zf em pu. Retorna corrente em kA primários.
 
-        modo='sincronas' (padrão): Thévenin puro da Ybus, SEM as fontes de conversor
-            pleno. Âncora de validação: 'RELATORIO DE DADOS DE CURTO-CIRCUITO' (MVA).
-        modo='completo': inclui as injeções do bloco DEOL. Âncora de validação:
-            'RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO' (kA). Zf não é suportado neste modo.
+        modo='completo' (PADRÃO): inclui as injeções dos geradores de conversor pleno
+            (bloco DEOL). Âncora de validação: 'RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO'
+            (kA). É o número regulatório, e por isso é o padrão. Zf não é suportado aqui.
+        modo='sincronas': Thévenin puro da Ybus, SEM essas fontes. Âncora de validação:
+            'RELATORIO DE DADOS DE CURTO-CIRCUITO' (MVA).
+
+        Num caso SEM registros DEOL os dois modos coincidem e nada precisa ser validado.
+        Com DEOL, o modo completo exige `validar_completo()` antes de responder — emitir
+        injeção não conferida contra o próprio caso é pior do que não emitir.
 
         Não misture modos dentro de um mesmo critério: combinar ICC_MAX de um com
         ICC_MIN do outro produz margem fictícia.
@@ -706,13 +712,10 @@ class Solver:
                O fator √3 e o uso da MAIOR das duas fases em falta foram determinados por
                reconciliação barra a barra: reproduzem exatamente as colunas de kA e de MVA
                do relatório (escolher a outra fase erra até 0,5%).
-
-        Não inclui geradores full-converter (fontes de corrente): este é o Thévenin puro da
-        Ybus. Para incluí-los, use `fault_fc`.
         """
         if modo not in self.MODOS:
             raise ValueError(f"modo deve ser um de {self.MODOS}, recebido {modo!r}")
-        if modo == 'completo':
+        if modo == 'completo' and self._tem_fc():
             if Zf:
                 raise NotImplementedError("impedância de falta ainda não suportada no modo completo")
             self._exigir_validacao_completo()
@@ -1191,7 +1194,7 @@ class Solver:
             return abs(np.sqrt(3) * Vf / (Z1 + Z2)) * Ib
         return None
 
-    def contribution(self, bus, kind='3F', modo='sincronas'):
+    def contribution(self, bus, kind='3F', modo='completo'):
         """Contribuicao de corrente de cada elemento incidente na barra para uma falta
         solida na propria barra. kind='3F' (modulo da corrente de fase, seq. positiva)
         ou '0' (modulo de I0 por ramo, seq. zero). Retorna dict {(tipo,bf,bt,nc): I_kA}.
@@ -1201,7 +1204,7 @@ class Solver:
         kvb=self.M.bus_kv.get(bus,0)
         if not kvb: return {}
         Ib=SB/(np.sqrt(3)*kvb)
-        if modo=='completo':
+        if modo=='completo' and self._tem_fc():
             if kind!='3F':
                 raise NotImplementedError("modo completo em contribution: apenas 3F")
             self._exigir_validacao_completo()
@@ -1456,6 +1459,15 @@ class Solver:
             if abs(inj) > 0:
                 out[('DEOL', bus, 0, '')] = abs(inj) * Ib
         return out
+
+    def _tem_fc(self):
+        """O caso tem geradores de conversor pleno?
+
+        Sem eles os dois modos coincidem: não há injeção a validar, e exigir
+        `validar_completo` seria atrito sem propósito — inclusive nos casos sintéticos
+        de teste, que não têm DEOL.
+        """
+        return bool(self._fc_sources())
 
     def _exigir_validacao_completo(self):
         """Bloqueia o modo completo enquanto o modelo de injeção não for validado.
