@@ -46,10 +46,12 @@ Chame `lincc.orientacao()` para o guia completo de tolerância e limitações co
 
 from ._base import SB, num, zfin, zn3
 from .model import AnaModel
-from .solver import Solver, branches_at, recomposicao_87b
+from .solver import (Solver, branches_at, recomposicao_87b,
+                     envelope_contribuicoes, tabela_envelope)
 
 __version__ = "0.2.0"
 __all__ = ["AnaModel", "Solver", "branches_at", "recomposicao_87b",
+           "envelope_contribuicoes", "tabela_envelope",
            "orientacao", "SB", "num", "zfin", "zn3"]
 
 _ORIENTACAO = """

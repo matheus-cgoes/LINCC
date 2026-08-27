@@ -978,6 +978,14 @@ class Solver:
             It=1/(Z1ff+Z2ff+Z0ff+3*zf); Ia1=Ia2=Ia0=It
         elif kind=='2F':
             Ia1=1/(Z1ff+Z2ff+2*zf); Ia2=-Ia1; Ia0=0j
+        elif kind=='2FT':
+            # Bifásica-terra: sequências negativa e zero em paralelo, vistas da positiva.
+            if Z0ff is None: return None
+            z2f, z0f = Z2ff+zf, Z0ff+zf
+            par = z2f*z0f/(z2f+z0f) if abs(z2f+z0f)>1e-18 else 0j
+            Ia1 = 1/(Z1ff+zf+par)
+            Ia2 = -Ia1*z0f/(z2f+z0f) if abs(z2f+z0f)>1e-18 else 0j
+            Ia0 = -Ia1*z2f/(z2f+z0f) if abs(z2f+z0f)>1e-18 else 0j
         else: return None
         V1=np.ones(len(self.BLP),dtype=complex)-Z1col*Ia1
         V2=-Z1col*Ia2
@@ -1281,6 +1289,189 @@ class Solver:
                                 if isinstance(v, dict))
         self.conciliado = saida['aprovado']
         return saida
+
+
+    def corrente_seq0_ramo(self, V0, br, bus):
+        """Corrente de sequência zero que o ramo `br` injeta na barra `bus`, em pu.
+
+        Necessária para o 3I0 dos bays de TRANSFORMADOR, que `branch_current` não cobre:
+        na rede de sequência zero um trafo não é um ramo série genérico. A topologia
+        depende da conexão:
+
+          YN-YN  ramo série: I0 = (V0_i − V0_j) / (z0 + 3Zn_i + 3Zn_j)
+          D-YN   caminho para a terra no lado YN: I0 = V0_YN / (z0 + 3Zn)
+          D-D    não há caminho de sequência zero: I0 = 0
+
+        `V0` é o vetor de tensões de sequência zero do estado de falta.
+        """
+        if br['tipo'] != 'T':
+            z0 = zfin(br.get('R0'), br.get('X0'))
+            if z0 is None or bus not in self.I0P:
+                return 0j
+            o = br['bt'] if br['bf'] == bus else br['bf']
+            if o not in self.I0P:
+                return 0j
+            return (V0[self.I0P[o]] - V0[self.I0P[bus]]) / z0
+        z0 = zfin(br.get('R0'), br.get('X0'))
+        if z0 is None:
+            return 0j
+        cd = self.conn_type(br.get('cd', 'YN'))
+        cp = self.conn_type(br.get('cp', 'YN'))
+        lado_de = (bus == br['bf'])
+        znd = zn3(br.get('rnde'), br.get('xnde'))
+        znp = zn3(br.get('rnpa'), br.get('xnpa'))
+        nun = br.get('nunop', 1) or 1
+        if bus not in self.I0P:
+            return 0j
+        vb = V0[self.I0P[bus]]
+        if cd == 'D' and cp == 'D':
+            return 0j
+        if cd == 'YN' and cp == 'YN':
+            if znd is None or znp is None:
+                return 0j
+            o = br['bt'] if lado_de else br['bf']
+            if o not in self.I0P:
+                return 0j
+            return nun * (V0[self.I0P[o]] - vb) / (z0 + znd + znp)
+        # D-YN: caminho para a terra no lado aterrado; do outro lado não circula
+        aterrado_de = (cd == 'YN')
+        if lado_de != aterrado_de:
+            return 0j
+        zn = znd if aterrado_de else znp
+        if zn is None:
+            return 0j
+        return -nun * vb / (z0 + zn)
+
+
+def envelope_contribuicoes(model, barra, tipos=('3F', '1FT', '2F', '2FT'),
+                           vizinhanca=1, p_close_in=0.005, solver=None):
+    """Envelope de correntes por bay, para ajuste de proteção de barra.
+
+    Executa o conjunto de casos que um estudo de barra pede, sem que seja preciso
+    enumerá-los a cada vez:
+
+      * os quatro tipos de defeito: monofásico, trifásico, bifásico e bifásico-terra;
+      * sistema completo e contingência simples (N-1) até `vizinhanca` barras;
+      * as contingências sendo RETIRADA de equipamento e FALTA NA LINHA COM O TERMINAL
+        OPOSTO ABERTO, que é a condição de abertura sequencial de disjuntor;
+      * defeito na própria barra e defeito close-in dentro de cada equipamento.
+
+    Devolve, POR BAY, a maior e a menor corrente do loop fase-fase e do loop de terra
+    (3I0), com o cenário em que cada extremo ocorreu — que é o que alimenta a corrente
+    mínima de operação e a de alarme.
+
+    Estrutura devolvida:
+
+        {bay: {'fase': {'max': (kA, cenario), 'min': (kA, cenario)},
+               'terra': {'max': (kA, cenario), 'min': (kA, cenario)},
+               'casos': [(cenario, tipo, I_fase_kA, I_3I0_kA), ...]}}
+
+    O bay é identificado pela tupla (tipo, bf, bt, nc) do elemento incidente. O mínimo
+    considera apenas cenários em que o bay está em serviço e a corrente é não nula: um
+    bay retirado não define mínimo de sensibilidade.
+    """
+    S0 = solver or Solver(model)
+    if not hasattr(S0, 'luP'):
+        S0.factor(avisar=False)
+    incid = [(br['tipo'], br['bf'], br['bt'], br['nc'])
+             for br in model.branches if barra in (br['bf'], br['bt'])
+             and (br['bf'], br['bt'], br['nc']) not in S0.dropB]
+    if not incid:
+        return {}
+
+    # --- cenários: (rótulo, drop_branches, barra_em_falta, ramo_close_in) -------------
+    cen = [('sistema completo', [], barra, None)]
+    # close-in dentro de cada equipamento incidente
+    for e in incid:
+        cen.append((f'close-in em {e[0]} {e[1]}-{e[2]}/{e[3]}', [], barra, e))
+    # N-1: retirada de cada elemento incidente e dos elementos das barras vizinhas
+    alvos = set(incid)
+    if vizinhanca >= 1:
+        viz = {e[2] if e[1] == barra else e[1] for e in incid}
+        for br in model.branches:
+            if (br['bf'] in viz or br['bt'] in viz):
+                alvos.add((br['tipo'], br['bf'], br['bt'], br['nc']))
+    for e in sorted(alvos):
+        if e in incid and len(incid) == 1:
+            continue                      # não deixar a barra sem alimentação
+        cen.append((f'N-1 sem {e[0]} {e[1]}-{e[2]}/{e[3]}', [(e[1], e[2], e[3])], barra, None))
+    # falta na linha com o terminal oposto aberto
+    for e in incid:
+        if e[0] == 'L':
+            cen.append((f'terminal oposto aberto em {e[1]}-{e[2]}/{e[3]}',
+                        [(e[1], e[2], e[3])], barra, ('LEO',) + e[1:]))
+
+    saida = {e: {'casos': []} for e in incid}
+    cache = {}
+    for rot, drop, fb, extra in cen:
+        chave = tuple(sorted(drop))
+        if chave not in cache:
+            try:
+                S = S0 if not drop else Solver(model, drop_branches=list(drop))
+                if drop:
+                    S.factor(avisar=False)
+                cache[chave] = S
+            except Exception:
+                cache[chave] = None
+        S = cache[chave]
+        if S is None or fb not in S.IDXP:
+            continue
+        for tipo in tipos:
+            try:
+                prof = S._seq_profile(fb, tipo)
+            except Exception:
+                prof = None
+            if prof is None:
+                continue
+            V0 = prof['V0']
+            for e in incid:
+                if (e[1], e[2], e[3]) in S.dropB:
+                    continue
+                try:
+                    r = S.branch_current(fb, e[1], e[2], e[3], tipo)
+                except Exception:
+                    r = None
+                if not r:
+                    continue
+                ifase = r['Imax']
+                kvb = model.bus_kv.get(barra, 0)
+                Ib = SB / (np.sqrt(3) * kvb) if kvb else 0
+                br = S._find_branch(e[1], e[2], e[3])
+                i3i0 = 0.0
+                if V0 is not None and br is not None and Ib:
+                    i3i0 = abs(3 * S.corrente_seq0_ramo(V0, br, barra)) * Ib
+                saida[e]['casos'].append((f'{rot} · {tipo}', tipo, ifase, i3i0))
+
+    for e, d in saida.items():
+        for campo, idx in (('fase', 2), ('terra', 3)):
+            vals = [(c[idx], c[0]) for c in d['casos'] if c[idx] > 1e-9]
+            if not vals:
+                d[campo] = {'max': (0.0, '—'), 'min': (0.0, '—')}
+                continue
+            d[campo] = {'max': max(vals), 'min': min(vals)}
+    return saida
+
+
+def tabela_envelope(env, model=None, largura=46):
+    """Formata o resultado de `envelope_contribuicoes` como texto pronto para relatório."""
+    linhas = []
+    cab = f"{'BAY':<26} {'FASE máx':>10} {'FASE mín':>10} {'3I0 máx':>10} {'3I0 mín':>10}"
+    linhas.append(cab)
+    linhas.append('-' * len(cab))
+    for e, d in env.items():
+        nome = f"{e[0]} {e[1]}-{e[2]}/{e[3]}"
+        linhas.append(f"{nome:<26} {d['fase']['max'][0]:10.3f} {d['fase']['min'][0]:10.3f} "
+                      f"{d['terra']['max'][0]:10.3f} {d['terra']['min'][0]:10.3f}")
+    linhas.append('')
+    linhas.append('Cenário de cada extremo (kA primários):')
+    for e, d in env.items():
+        nome = f"{e[0]} {e[1]}-{e[2]}/{e[3]}"
+        linhas.append(f"  {nome}")
+        for campo, rot in (('fase', 'fase-fase'), ('terra', '3I0')):
+            for extremo in ('max', 'min'):
+                val, cen = d[campo][extremo]
+                linhas.append(f"     {rot:<10} {extremo:>3}: {val:9.3f}   {cen[:largura]}")
+    return '\n'.join(linhas)
 
 
 def branches_at(model, bus, tipos=('L','T')):

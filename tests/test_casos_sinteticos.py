@@ -182,3 +182,38 @@ def test_escala_da_injecao_usa_imax_e_nao_in():
     assert Solver._mod_fc(reg, 0.90)[0] == pytest.approx(0.0)
     meio, _ = Solver._mod_fc(reg, (0.50 + 0.85) / 2)
     assert meio == pytest.approx(0.5 * reg["Imax"], rel=0.05)
+
+
+def test_envelope_contribuicoes_cobre_o_estudo_padrao(radial):
+    """O envelope executa o conjunto de casos de um estudo de barra sem enumeração.
+
+    Quatro tipos de defeito, sistema completo e N-1, contingência por retirada e por
+    terminal oposto aberto, defeito na barra e close-in — devolvendo maior e menor
+    corrente de fase e de 3I0 por bay, com o cenário de cada extremo.
+    """
+    from lincc import envelope_contribuicoes, tabela_envelope
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    env = envelope_contribuicoes(M, 2, solver=radial)
+    assert env, "a barra tem elementos incidentes e deve produzir envelope"
+    for bay, d in env.items():
+        assert {"fase", "terra", "casos"} <= d.keys()
+        for campo in ("fase", "terra"):
+            assert d[campo]["max"][0] >= d[campo]["min"][0]
+            assert isinstance(d[campo]["max"][1], str)      # cenário identificado
+        # os quatro tipos de defeito aparecem entre os casos
+        assert {c[1] for c in d["casos"]} == {"3F", "1FT", "2F", "2FT"}
+    texto = tabela_envelope(env, M)
+    assert "FASE máx" in texto and "3I0" in texto
+
+
+def test_corrente_seq0_em_bay_de_transformador(radial):
+    """3I0 do bay de transformador: na rede de sequência zero o trafo não é ramo série.
+
+    Com YN-D, o lado aterrado é caminho para a terra e o outro não conduz sequência
+    zero. `branch_current` não cobre isso; `corrente_seq0_ramo` cobre.
+    """
+    prof = radial._seq_profile(2, "1FT")
+    br = radial._find_branch(2, 3, "1")
+    assert br is not None and br["tipo"] == "T"
+    i0_yn = radial.corrente_seq0_ramo(prof["V0"], br, 2)     # lado YN (138 kV)
+    assert abs(i0_yn) > 1e-6, "o lado aterrado deve conduzir sequência zero"
