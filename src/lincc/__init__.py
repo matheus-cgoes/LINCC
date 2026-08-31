@@ -45,12 +45,15 @@ Chame `lincc.orientacao()` para o guia completo de tolerância e limitações co
 """
 
 from ._base import SB, num, zfin, zn3
+from . import curvas, dados_externos, sm211
+from .curvas import tempo, tms_para_tempo, CURVAS
 from .model import AnaModel
 from .solver import (Solver, branches_at, recomposicao_87b,
                      envelope_contribuicoes, tabela_envelope)
 
 __version__ = "0.2.0"
 __all__ = ["AnaModel", "Solver", "branches_at", "recomposicao_87b",
+           "curvas", "tempo", "tms_para_tempo", "CURVAS", "dados_externos", "sm211",
            "envelope_contribuicoes", "tabela_envelope",
            "orientacao", "SB", "num", "zfin", "zn3"]
 
@@ -109,6 +112,15 @@ LINCC — guia de modos, tolerância e limitações conhecidas
 
    b) Nenhum resíduo material conhecido no caso de referência: todas as barras que
       convergem ficam abaixo de 1%, com máximo de 0,92%.
+
+   c) Capacitância de linha (charging). Existe como opção, `Solver(M, charging=True)`,
+      mas fica DESLIGADA por padrão: o gabarito de impedância de barra do ANAFAS não a
+      inclui, e ligá-la derruba Z1 de 100,000% para 50,4%. O cálculo de falta com
+      terminal aberto do ANAFAS, esse sim, a inclui — daí `line_end_open` errar 4,11% em
+      falta trifásica contra 0,41% na monofásica. Conservador para sensibilidade, não
+      conservador para dimensionamento. Ligar a opção NÃO corrige esse desvio, porque a
+      função remove a linha e a capacitância dela sai junto: a correção pede modelar o
+      trecho como stub pendurado, e está pendente.
 
    c) Faltas desequilibradas no modo completo usam a tensão equivalente do estado
       convergido. O conversor contribui só em sequência positiva (manual, item 2.8.3).

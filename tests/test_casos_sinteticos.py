@@ -217,3 +217,108 @@ def test_corrente_seq0_em_bay_de_transformador(radial):
     assert br is not None and br["tipo"] == "T"
     i0_yn = radial.corrente_seq0_ramo(prof["V0"], br, 2)     # lado YN (138 kV)
     assert abs(i0_yn) > 1e-6, "o lado aterrado deve conduzir sequência zero"
+
+
+# ---------- impedância de falta e curvas de tempo inverso ----------
+
+def test_impedancia_de_falta_reduz_a_corrente(radial):
+    """Zf reduz a corrente monotonicamente, e Zf=0 reproduz a falta franca."""
+    franca = radial.fault(2, "3F")
+    assert radial.fault(2, "3F", Zf=0.0) == pytest.approx(franca)
+    anterior = franca
+    for zf in (0.05, 0.2, 1.0):
+        atual = radial.fault(2, "3F", Zf=zf)
+        assert atual < anterior
+        anterior = atual
+    # conferência analítica: I = Ib / |Z1 + Zf|
+    ib138 = SB / (math.sqrt(3) * 138.0)
+    assert radial.fault(2, "3F", Zf=0.1) == pytest.approx(ib138 / abs(complex(0.1, 0.20)),
+                                                          rel=1e-9)
+
+
+def test_curvas_iec_e_ieee():
+    """IEC é o padrão; a IEEE traz o fator 1/7 da C37.112 e dá tempo bem menor.
+
+    Comparar TMS da IEC com TD da IEEE sem converter é erro comum: para I/Is = 5 na
+    muito inversa, o multiplicador difere por mais de uma ordem de grandeza.
+    """
+    from lincc import tempo, tms_para_tempo
+    from lincc.curvas import descreve, constantes
+    assert tempo(2000, 400, 1.0) == pytest.approx(3.375, rel=1e-9)          # IEC MI
+    assert tempo(2000, 400, 1.0, norma="IEEE") == pytest.approx(19.61 / 24 / 7 + 0.491 / 7,
+                                                                rel=1e-9)
+    assert tempo(300, 400, 1.0) == math.inf                                 # abaixo do pickup
+    # o inverso fecha nas duas normas
+    for norma in ("IEC", "IEEE"):
+        tms = tms_para_tempo(2000, 400, 0.4, norma=norma)
+        assert tempo(2000, 400, tms, norma=norma) == pytest.approx(0.4, rel=1e-9)
+    assert "IEC" in descreve() and "muito inversa" in descreve()
+    with pytest.raises(ValueError):
+        constantes("INEXISTENTE")
+
+
+def test_sm211_escopo_e_tempos():
+    """O Submódulo 2.11 define escopo funcional e tempos, não critérios de ajuste."""
+    from lincc.sm211 import funcoes_exigidas, tempo_maximo, verificar_escopo, exige_stub
+    assert tempo_maximo(500) == 70 and tempo_maximo(230) == 90      # item 4.1.2
+    assert tempo_maximo(500, falha_disjuntor=True) == 250           # item 4.7.2
+    assert exige_stub("barra dupla com disjuntor e meio")           # item 4.1.6
+    assert not exige_stub("barra dupla a quatro chaves")
+    codigos = {c for c, _, _ in funcoes_exigidas("transformador")}
+    assert {"87", "87N", "59G"} <= codigos                          # item 4.4.1
+    falta = verificar_escopo("reator", ["87", "50/51", "63"])
+    assert "87R" in {c for c, _, _ in falta}                        # item 4.5.1(a)(2)
+    assert verificar_escopo("barra", ["87B"]) == []
+
+
+def test_line_end_open_varre_a_posicao(radial):
+    """Falta em qualquer posição com o terminal remoto aberto, de close-in à ponta."""
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    S = Solver(M); S.factor(avisar=False)
+    serie = S.varredura_line_end_open(1, 2, "1", 1, kinds=("3F",))["3F"]
+    assert len(serie) >= 5
+    correntes = [i for _, i in serie]
+    # a corrente decai monotonicamente com a distância da falta
+    assert all(a > b for a, b in zip(correntes, correntes[1:]))
+    # p=1 é o padrão
+    assert S.line_end_open(1, 2, "1", 1, "3F") == pytest.approx(correntes[-1])
+
+
+def test_charging_e_opcional_e_desligado_por_padrao():
+    """A capacitância de linha existe como opção, mas fica DESLIGADA por padrão.
+
+    O gabarito de impedância de barra do ANAFAS não a inclui: ligada, Z1 cai de 100,000%
+    para 50,4% das barras dentro de 1%. Já o cálculo de falta com terminal aberto a
+    inclui. As duas coisas convivem no ANAFAS, e por isso o parâmetro é explícito — nunca
+    use `charging=True` para conciliar contra o relatório de impedâncias.
+    """
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    assert Solver(M).charging is False
+    assert Solver(M, charging=True).charging is True
+    # o caso sintético não declara S1/S0: os dois têm de coincidir exatamente
+    a = Solver(M); a.factor(avisar=False)
+    b = Solver(M, charging=True); b.factor(avisar=False)
+    assert a.fault(2, "3F") == pytest.approx(b.fault(2, "3F"), rel=1e-12)
+
+
+def test_potencia_nominal_lida_da_base():
+    """O .ANA traz a potência nominal no campo MVA do DCIR — usar quando preenchida.
+
+    É a única grandeza de capacidade do arquivo. Onde existe, dispensa o usuário de
+    informar a nominal. Não é a carga MÁXIMA operativa, que o critério do 51 de linha
+    pede e o arquivo não contém.
+    """
+    from lincc.dados_externos import da_base, faltantes
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    # o caso sintético não declara MVA: nada deve ser extraído
+    assert da_base(M, 1, 2, "1") == {}
+    assert "in_lt" in faltantes("linha", {}, model=M, elemento=(1, 2, "1"))
+    # com o campo presente, a corrente nominal sai de In = MVA·1000/(√3·kV)
+    for br in M.branches:
+        if br["tipo"] == "L":
+            br["MVA"] = 200.0
+            break
+    d = da_base(M, 1, 2, "1")
+    assert d["mva_nominal"] == 200.0
+    assert d["in_lt"] == pytest.approx(200_000 / (math.sqrt(3) * 138.0), rel=1e-9)
+    assert "in_lt" not in faltantes("linha", {}, model=M, elemento=(1, 2, "1"))

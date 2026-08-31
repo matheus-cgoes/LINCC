@@ -112,6 +112,12 @@ class AnaModel:
             bf = ln[0:5].strip(); bt = ln[7:12].strip()
             R1,X1,R0,X0 = num(ln[17:23]),num(ln[23:29]),num(ln[29:35]),num(ln[35:41])
             S1,S0 = num(ln[47:52]), num(ln[52:57])
+            # Potência nominal do elemento, coluna MVA do DCIR [176:184]. É a única
+            # grandeza de CAPACIDADE que o .ANA traz — não há corrente de carregamento
+            # nem limite operativo. Quando preenchida (14.105 de 24.405 registros no caso
+            # de referência), dispensa o usuário de informar a nominal para o pickup do
+            # 51 de linha e do transformador. Valor direto em MVA, sem escala implícita.
+            MVA = _numf(ln[176:184]) if len(ln) > 176 else None
             nome = ln[41:47].strip()
             try: bff = int(bf)
             except: bff = None
@@ -151,7 +157,7 @@ class AnaModel:
             elif tipo == 'L':
                 cd,cp = self._conns(ln)
                 self.branches.append(dict(tipo='L', bf=bff, bt=btt, nc=ln[14:16].strip(),
-                                          R1=R1,X1=X1,R0=R0,X0=X0,S1=S1,S0=S0))
+                                          R1=R1,X1=X1,R0=R0,X0=X0,S1=S1,S0=S0,MVA=MVA))
             elif tipo == 'T':
                 cd,cp = self._conns(ln)
                 rnde,xnde,rnpa,xnpa = self._aterr(ln)
@@ -160,7 +166,8 @@ class AnaModel:
                 except: tnun = 1
                 self.branches.append(dict(tipo='T', bf=bff, bt=btt, nc=ln[14:16].strip(),
                                           R1=R1,X1=X1,R0=R0,X0=X0,cd=cd,cp=cp,
-                                          rnde=rnde,xnde=xnde,rnpa=rnpa,xnpa=xnpa,nunop=tnun))
+                                          rnde=rnde,xnde=xnde,rnpa=rnpa,xnpa=xnpa,nunop=tnun,
+                                          MVA=MVA))
         # DMUT (opcional: caso sem acoplamento mútuo é legítimo)
         i = idx.get('DMUT', -1)+1
         end = fim_de('DMUT') if 'DMUT' in idx else 0

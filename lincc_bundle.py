@@ -164,6 +164,12 @@ class AnaModel:
             bf = ln[0:5].strip(); bt = ln[7:12].strip()
             R1,X1,R0,X0 = num(ln[17:23]),num(ln[23:29]),num(ln[29:35]),num(ln[35:41])
             S1,S0 = num(ln[47:52]), num(ln[52:57])
+            # Potência nominal do elemento, coluna MVA do DCIR [176:184]. É a única
+            # grandeza de CAPACIDADE que o .ANA traz — não há corrente de carregamento
+            # nem limite operativo. Quando preenchida (14.105 de 24.405 registros no caso
+            # de referência), dispensa o usuário de informar a nominal para o pickup do
+            # 51 de linha e do transformador. Valor direto em MVA, sem escala implícita.
+            MVA = _numf(ln[176:184]) if len(ln) > 176 else None
             nome = ln[41:47].strip()
             try: bff = int(bf)
             except: bff = None
@@ -203,7 +209,7 @@ class AnaModel:
             elif tipo == 'L':
                 cd,cp = self._conns(ln)
                 self.branches.append(dict(tipo='L', bf=bff, bt=btt, nc=ln[14:16].strip(),
-                                          R1=R1,X1=X1,R0=R0,X0=X0,S1=S1,S0=S0))
+                                          R1=R1,X1=X1,R0=R0,X0=X0,S1=S1,S0=S0,MVA=MVA))
             elif tipo == 'T':
                 cd,cp = self._conns(ln)
                 rnde,xnde,rnpa,xnpa = self._aterr(ln)
@@ -212,7 +218,8 @@ class AnaModel:
                 except: tnun = 1
                 self.branches.append(dict(tipo='T', bf=bff, bt=btt, nc=ln[14:16].strip(),
                                           R1=R1,X1=X1,R0=R0,X0=X0,cd=cd,cp=cp,
-                                          rnde=rnde,xnde=xnde,rnpa=rnpa,xnpa=xnpa,nunop=tnun))
+                                          rnde=rnde,xnde=xnde,rnpa=rnpa,xnpa=xnpa,nunop=tnun,
+                                          MVA=MVA))
         # DMUT (opcional: caso sem acoplamento mútuo é legítimo)
         i = idx.get('DMUT', -1)+1
         end = fim_de('DMUT') if 'DMUT' in idx else 0
@@ -297,8 +304,25 @@ class AnaModel:
 
 class Solver:
     def __init__(self, model, drop_branches=None, drop_gens=None, block_btb=True,
-                 dispatch_file=None):   # despacho inferido OBSOLETO: estados do DBAR ('d') cobrem o caso
+                 dispatch_file=None,   # despacho inferido OBSOLETO: estados do DBAR ('d') cobrem o caso
+                 charging=False):
+        """`charging`: representar a capacitância de linha (campos S1 e S0), em π.
+
+        PADRÃO DESLIGADO, e a razão é medida. O relatório de impedâncias de barra do
+        ANAFAS — o gabarito contra o qual o motor é validado — NÃO inclui o charging:
+        com ele ligado, Z1 cai de 100,000% para 50,4% das barras dentro de 1%, nas duas
+        bases testadas. Logo o cálculo de impedância de barra do ANAFAS é sem charging.
+
+        Já o cálculo de FALTA com terminal aberto o inclui: no caso de referência o
+        trecho aberto injeta 33 A no ponto de falta, e a trifásica difere 4,11% do que o
+        motor calcula sem ele. As duas coisas convivem no ANAFAS.
+
+        Ligue apenas quando a capacitância importar para a grandeza em questão — falta
+        com terminal aberto, linha longa em vazio — e NUNCA para conciliar contra o
+        relatório de impedâncias, que reprovaria função correta.
+        """
         self.M = model
+        self.charging = bool(charging)
         self.dropB = set(drop_branches) if drop_branches else set()   # {(bf,bt,nc)}
         self.dropG = set(drop_gens) if drop_gens else set()   # {bus}
         # Despacho inferido: usinas fora de operação na configuração-base do caso
@@ -376,6 +400,9 @@ class Solver:
             nun = (br.get('nunop',1) or 1) if br['tipo']=='T' else 1   # bancos de trafo
             i,j = IDX[bf],IDX[bt]; ys=nun/z
             YP[i,j]-=ys; YP[j,i]-=ys; YP[i,i]+=ys; YP[j,j]+=ys
+            if self.charging and br['tipo']=='L' and br.get('S1'):
+                yh = 1j*(br['S1']/100.0)/2      # modelo pi: metade em cada extremidade
+                YP[i,i]+=yh; YP[j,j]+=yh
             # Modelagem PECO (sem tensão pré-falta): line charging NÃO é representado
             # na seq+ (manual ANAFAS seç. 2.2/2.5 — capacitância de linha só é modelada
             # no formato com tensão pré-falta).
@@ -450,7 +477,7 @@ class Solver:
             z=zfin(br['R0'], br['X0'])
             if z is None: continue
             # PECO: line charging (S0) não representado (manual seç. 2.2/2.5)
-            bsh=0.0
+            bsh=(br.get('S0') or 0.0)/100.0 if self.charging else 0.0
             k=self.lt_key(bf,bt,br['nc'])
             if k in cortes and k in direc:
                 a0,b0=direc[k]; ps=sorted(cortes[k])
@@ -716,10 +743,8 @@ class Solver:
         if modo not in self.MODOS:
             raise ValueError(f"modo deve ser um de {self.MODOS}, recebido {modo!r}")
         if modo == 'completo' and self._tem_fc():
-            if Zf:
-                raise NotImplementedError("impedância de falta ainda não suportada no modo completo")
             self._exigir_validacao_completo()
-            return self.fault_fc(bus, kind)
+            return self.fault_fc(bus, kind, Zf=Zf)
         kv=self.M.bus_kv.get(bus,0)
         if not kv: return None
         Ib=SB/(np.sqrt(3)*kv)
@@ -963,7 +988,7 @@ class Solver:
         return self._inorton
 
     def _estado_fc(self, bus, niter=400, damp=1.0, tol=1e-8, strict=True,
-                   ang_prefalta=False, tol_saida=1e-5):
+                   ang_prefalta=False, tol_saida=1e-5, Zf=0.0):
         """Resolve o estado da rede com as fontes DEOL ativas, para falta franca em `bus`.
 
         Devolve (V, Ifault, info): V o vetor de tensões nodais convergido, Ifault a
@@ -1000,13 +1025,13 @@ class Solver:
         k = self.IDXP[bus]
         N = len(self.BLP)
         ek = np.zeros(N, dtype=complex); ek[k] = 1
-        zk = self.luP.solve(ek); Zkk = zk[k]
+        zk = self.luP.solve(ek); Zkk = zk[k] + complex(Zf)   # Zf: falta não franca
         Inorton = self._norton()
         fc = self._fc_sources()
 
         def resolver(Ieol):
             V0 = self.luP.solve(Inorton + Ieol)
-            If = V0[k] / Zkk
+            If = V0[k] / Zkk                    # Zkk já inclui Zf
             return V0 - If * zk, If
 
         Ieol = np.zeros(N, dtype=complex)
@@ -1152,7 +1177,7 @@ class Solver:
             # fica como degradação controlada, sinalizada em info['ang_prefalta'].
             return self._estado_fc(bus, strict=True, ang_prefalta=True, **kw)
 
-    def fault_fc(self, bus, kind='3F', niter=60, damp=1.0, tol=1e-8, strict=True):
+    def fault_fc(self, bus, kind='3F', niter=60, damp=1.0, tol=1e-8, strict=True, Zf=0.0):
         """Corrente de falta em kA COM as fontes de conversor pleno (bloco DEOL).
 
         É a grandeza comparável ao 'RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO' do ANAFAS,
@@ -1169,8 +1194,9 @@ class Solver:
         if not kv:
             return None
         Ib = SB / (np.sqrt(3) * kv)
+        zf = complex(Zf)
         if kind == '3F':
-            _, If, _ = self._estado_fc_robusto(bus, niter=niter, damp=damp, tol=tol)
+            _, If, _ = self._estado_fc_robusto(bus, niter=niter, damp=damp, tol=tol, Zf=zf)
             return abs(If) * Ib
         # Faltas desequilibradas: a injeção de sequência positiva desloca a tensão
         # equivalente de pré-falta vista pela rede de sequência. Resolve-se o estado com
@@ -1180,18 +1206,19 @@ class Solver:
         Z1, Z2, Z0 = self.zth(bus)
         if Z1 is None or Z0 is None:
             return None
-        V, If3, _ = self._estado_fc_robusto(bus, niter=niter, damp=damp, tol=tol)
-        Vf = abs(If3 * Z1)          # tensão pré-falta equivalente com as fontes ativas
+        V, If3, _ = self._estado_fc_robusto(bus, niter=niter, damp=damp, tol=tol, Zf=zf)
+        Vf = abs(If3 * (Z1 + zf))   # tensão pré-falta equivalente com as fontes ativas
+        z1f, z2f, z0f = Z1 + zf, Z2 + zf, Z0 + zf
         if kind == '1FT':
-            return abs(3 * Vf / (Z1 + Z2 + Z0)) * Ib
+            return abs(3 * Vf / (Z1 + Z2 + Z0 + 3 * zf)) * Ib
         if kind == '2FT':
             a = np.exp(2j * np.pi / 3)
-            den = Z1 * Z2 + Z1 * Z0 + Z2 * Z0
-            ib = Vf * (Z0 - a * Z2) / den
-            ic = Vf * (Z0 - a.conjugate() * Z2) / den
+            den = z1f * z2f + z1f * z0f + z2f * z0f
+            ib = Vf * (z0f - a * z2f) / den
+            ic = Vf * (z0f - a.conjugate() * z2f) / den
             return np.sqrt(3) * max(abs(ib), abs(ic)) * Ib
         if kind == '2F':
-            return abs(np.sqrt(3) * Vf / (Z1 + Z2)) * Ib
+            return abs(np.sqrt(3) * Vf / (Z1 + Z2 + 2 * zf)) * Ib
         return None
 
     def contribution(self, bus, kind='3F', modo='completo'):
@@ -1312,38 +1339,80 @@ class Solver:
         return dict(Va=abs(Va),Vb=abs(Vb),Vc=abs(Vc),V1=abs(V1),V2=abs(V2),V0=abs(V0),
                     Va_c=Va,V1_c=V1,V0_c=V0)
 
-    def line_end_open(self, bf, bt, nc, closed, kind='3F', Zf=0.0):
-        """Corrente no terminal FECHADO (closed) para falta na extremidade ABERTA da linha
-        (bf,bt,nc). Modela o terminal remoto aberto (disjuntor abriu primeiro): Zth no terminal
-        fechado com a linha removida, em serie com a impedancia total da linha, falta na ponta.
-        Retorna kA primarios no terminal fechado."""
-        br=self._find_branch(bf,bt,nc)
-        if br is None or br['tipo']!='L': return None
-        drop=list(self.dropB)+[(br['bf'],br['bt'],br['nc'])]
-        S2=Solver(self.M, drop_branches=drop, block_btb=False); S2.factor()
-        Z1,_,Z0=S2.zth(closed)
-        if Z1 is None: return None
-        z1L=complex(br['R1'],br['X1'])/100
-        z0L=complex(br['R0'],br['X0'])/100 if (br.get('R0') is not None and br.get('X0') is not None) else None
-        kvb=self.M.bus_kv.get(closed,0); Ib=SB/(np.sqrt(3)*kvb); zf=complex(Zf)
-        Z1t=Z1+z1L; Z2t=Z1t
-        if kind=='3F':
-            I=1/(Z1t+zf)
-        elif kind=='1FT':
-            if Z0 is None or z0L is None: return None
-            I=3/(Z1t+Z2t+(Z0+z0L)+3*zf)
-        elif kind=='2F':
-            I=np.sqrt(3)/(Z1t+Z2t+2*zf)
-        else: return None
-        return abs(I)*Ib
+    def line_end_open(self, bf, bt, nc, closed, kind='3F', p=1.0, Zf=0.0):
+        """Falta na linha (bf,bt,nc) com o terminal remoto ABERTO.
 
-    def _clone_model(self):
-        import copy as _c
-        Mm=_c.copy(self.M)
-        Mm.branches=list(self.M.branches)
-        Mm.bus_kv=dict(self.M.bus_kv); Mm.bus_name=dict(self.M.bus_name)
-        Mm.shunts=list(self.M.shunts)
-        return Mm
+        Condição de abertura sequencial de disjuntor: o terminal oposto já abriu e a
+        falta permanece. Devolve a corrente que atravessa o TC do terminal `closed`, em
+        kA primários.
+
+        `p` é a posição da falta, medida a partir de `closed`, de 0 a 1:
+
+            p → 0    close-in, na cara do disjuntor
+            p = 0.5  meio da linha
+            p = 1    ponta oposta, junto ao terminal aberto (padrão)
+
+        LIMITAÇÃO CONHECIDA. Sem representação de charging, o trecho entre a falta e o
+        terminal aberto não conduz, e a corrente do TC é a da falta. O ANAFAS mantém o
+        trecho pendurado e representa sua capacitância: no caso de referência (falta em
+        6640 com 5570 aberto) a monofásica fecha em −0,41%, mas a trifásica erra −4,11%,
+        porque a capacitância do stub reduz a impedância vista. O erro é conservador para
+        sensibilidade e não conservador para dimensionamento. Ver docs/uso.md.
+        """
+        br = self._find_branch(bf, bt, nc)
+        if br is None or br['tipo'] != 'L':
+            return None
+        p = min(max(float(p), 0.0), 1.0)
+        drop = list(self.dropB) + [(br['bf'], br['bt'], br['nc'])]
+        S2 = Solver(self.M, drop_branches=drop); S2.factor(avisar=False)
+        Z1, _, Z0 = S2.zth(closed)
+        if Z1 is None:
+            return None
+        z1L = complex(br['R1'], br['X1']) / 100
+        z0L = (complex(br['R0'], br['X0']) / 100
+               if (br.get('R0') is not None and br.get('X0') is not None) else None)
+        kvb = self.M.bus_kv.get(closed, 0)
+        if not kvb:
+            return None
+        Ib = SB / (np.sqrt(3) * kvb); zf = complex(Zf)
+        Z1t = Z1 + p * z1L; Z2t = Z1t
+        if kind == '3F':
+            I = 1 / (Z1t + zf)
+        elif kind == '1FT':
+            if Z0 is None or z0L is None:
+                return None
+            I = 3 / (Z1t + Z2t + (Z0 + p * z0L) + 3 * zf)
+        elif kind == '2F':
+            I = np.sqrt(3) / (Z1t + Z2t + 2 * zf)
+        elif kind == '2FT':
+            if Z0 is None or z0L is None:
+                return None
+            z0t = Z0 + p * z0L + zf
+            z1f, z2f = Z1t + zf, Z2t + zf
+            a = np.exp(2j * np.pi / 3)
+            den = z1f * z2f + z1f * z0t + z2f * z0t
+            ib = (z0t - a * z2f) / den
+            ic = (z0t - a.conjugate() * z2f) / den
+            return np.sqrt(3) * max(abs(ib), abs(ic)) * Ib
+        else:
+            return None
+        return abs(I) * Ib
+
+    def varredura_line_end_open(self, bf, bt, nc, closed, kinds=('3F', '1FT', '2F', '2FT'),
+                                pontos=(0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0)):
+        """Varre a posição da falta com o terminal remoto aberto.
+
+        Devolve {kind: [(p, I_kA), ...]}. É a condição que dimensiona o alcance das zonas
+        de distância: a corrente cai monotonicamente com a distância da falta, e o extremo
+        de sensibilidade está na ponta oposta.
+        """
+        saida = {}
+        for kind in kinds:
+            serie = [(p, I) for p in pontos
+                     if (I := self.line_end_open(bf, bt, nc, closed, kind, p=p))]
+            if serie:
+                saida[kind] = serie
+        return saida
 
     def fault_on_branch(self, bf, bt, nc, p, kind='3F', Zf=0.0):
         """Falta a fracao p (0..1, medida a partir de bf) ao longo de um RAMO SERIE
