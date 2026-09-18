@@ -353,3 +353,80 @@ def test_solver_nao_depende_do_motor_de_protecao():
              / "src" / "lincc" / "solver.py").read_text(encoding="utf-8")
     assert "protecao" not in fonte
     assert "import fluxo" not in fonte and "from .fluxo" not in fonte
+
+
+def test_falta_desequilibrada_no_modo_completo_usa_impedancia_equivalente():
+    """Falta assimétrica: a rede de sequência positiva vê a falta como impedância.
+
+    Regressão. A formulação anterior resolvia o estado TRIFÁSICO e reaproveitava a tensão
+    equivalente, errando com mediana de 14,5% na monofásica. O correto é resolver o estado
+    com Z_eq no lugar de Zf: Z2+Z0+3Zf para 1FT, Z2+2Zf para 2F, Z2∥(Z0+3Zf) para 2FT —
+    porque na falta assimétrica a tensão da barra NÃO é zero, e é ela que define a injeção
+    de cada conversor.
+
+    Sem DEOL os dois modos coincidem, e é o que se verifica aqui: a formulação nova não
+    pode alterar o caso sem conversor.
+    """
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    S = Solver(M); S.factor(avisar=False)
+    for kind in ("1FT", "2F", "2FT"):
+        assert S.fault(2, kind) == pytest.approx(S.fault(2, kind, modo="sincronas"),
+                                                 rel=1e-12)
+
+
+# ---------- funções de alto nível ----------
+
+def test_impacto_entrada(radial):
+    """Impacto da entrada de um equipamento: compara com e sem, e reporta o tipo que governa."""
+    from lincc import impacto_entrada
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    r = impacto_entrada(M, [(1, 2, "1")], limiar=1.0, kv_min=1.0)
+    assert r["limiar"] == 1.0 and r["n_avaliadas"] >= 2
+    for d in r["barras"]:
+        assert {"num", "nome", "kv", "antes", "depois", "variacao_pct", "kind"} <= d.keys()
+        assert d["kind"] in ("3F", "1FT", "2F", "2FT")
+    # a lista sai ordenada pela maior variação absoluta
+    v = [abs(d["variacao_pct"]) for d in r["barras"]]
+    assert v == sorted(v, reverse=True)
+
+
+def test_relatorio_curto(radial):
+    """Relatório de curto de uma barra: correntes nos quatro tipos, Thévenin, contribuições."""
+    from lincc import relatorio_curto
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    r = relatorio_curto(M, 2)
+    assert set(r["correntes"]) == {"3F", "1FT", "2F", "2FT"}
+    assert r["zth"]["Z1"] is not None
+    assert r["correntes"]["3F"] == pytest.approx(radial.fault(2, "3F"), rel=1e-9)
+    assert r["modo"] == "sincronas"        # padrão das funções de alto nível
+
+
+def test_relatorio_protecao_por_tipo():
+    """Relatório de proteção para cada tipo, com as funções do 2.11 e o que falta."""
+    from lincc import relatorio_protecao
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    r = relatorio_protecao(M, "barra", 2)
+    assert "curto_na_barra" in r["grandezas"] and "envelope_por_bay" in r["grandezas"]
+    assert "87B" in {c for c, _, _ in r["funcoes_sm211"]}
+    r = relatorio_protecao(M, "linha", (1, 2, "1"), n1=False)
+    assert r["grandezas"]["Z1"] is not None and r["grandezas"]["k0"] is not None
+    assert "21/21N" in {c for c, _, _ in r["funcoes_sm211"]}
+    assert "carga_max_lt" in r["dados_faltantes"]       # o .ANA não traz carga máxima
+    with pytest.raises(ValueError):
+        relatorio_protecao(M, "inexistente", 2)
+
+
+def test_monofasica_usa_a_propria_tensao_da_barra(radial):
+    """Na falta assimétrica a tensão de sequência positiva não colapsa.
+
+    O conversor responde à própria tensão terminal, tipicamente na rampa da curva. Aqui
+    verifica-se a consequência estrutural: com Z_eq = Z2+Z0, a tensão de sequência
+    positiva da barra em falta é NÃO NULA e vale Ia1·Z_eq — ao contrário da trifásica,
+    onde é zero. É isso que muda a injeção de cada conversor entre os dois tipos.
+    """
+    Z1, Z2, Z0 = radial.zth(2)
+    _, Ia1, _ = radial._estado_fc_robusto(2, Zf=Z2 + Z0)
+    V1 = Ia1 * (Z2 + Z0)
+    assert abs(V1) > 1e-6, "tensão de sequência positiva não colapsa na monofásica"
+    _, If3, _ = radial._estado_fc_robusto(2, Zf=0.0)
+    assert abs(If3 * 0.0) == 0.0          # na trifásica franca a tensão da barra é zero

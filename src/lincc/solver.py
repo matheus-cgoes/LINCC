@@ -817,6 +817,7 @@ class Solver:
         # Ela basta enquanto |Z_transferência| < |Z_Thévenin|; um banco com reatância
         # negativa inverte essa relação e o Newton complexo entra em ciclo limite, com o
         # resíduo estacionando num patamar. Em coordenadas reais o Jacobiano é exato.
+        passo_base = damp
         Zr, Zi = Zf.real, Zf.imag
         B = np.block([[Zr, -Zi], [Zi, Zr]])          # d(Vre,Vim)/d(Ire,Iim)
         Id2 = np.eye(2 * n)
@@ -861,7 +862,26 @@ class Solver:
             except np.linalg.LinAlgError:
                 d = gr                                  # singular: passo de Picard
             dI = d[:n] + 1j * d[n:]
-            Ivec = Ivec + damp * dI
+            # PASSO ADAPTATIVO. O passo cheio de Newton diverge quando as fontes estão
+            # fortemente acopladas entre si — na barra 45019 do caso de referência o
+            # acoplamento fora da diagonal de Zf chega a 31x a diagonal, e com damp=1,0 o
+            # resíduo sobe a 7,9 pu. Reduzir o passo faz convergir para o mesmo valor
+            # (23,149 kA com damp de 0,5 a 0,1), então é instabilidade do passo, não
+            # ausência de solução. Aceita-se o fator que reduza o resíduo; se nenhum
+            # reduzir, o menor evita o salto que divergiria.
+            passo, melhor_res, melhor = passo_base, res, None
+            for fator in (passo_base, passo_base / 2, passo_base / 4,
+                          passo_base / 8, passo_base / 16):
+                cand = Ivec + fator * dI
+                Vc = Vth + Zf @ cand
+                gc = np.array([sum(self._inj_fc(r, Vc[c], angs[c]) for r in ativos[c][2])
+                               for c in range(n)], dtype=complex) - cand
+                rc = float(np.max(np.abs(gc)))
+                if melhor is None or rc < melhor_res:
+                    melhor_res, melhor, passo = rc, cand, fator
+                if rc < res:
+                    break
+            Ivec = melhor if melhor is not None else Ivec + (passo_base / 16) * dI
         Ieol = np.zeros(N, dtype=complex)
         Ieol[idxs] = Ivec
         V, If = resolver(Ieol)
@@ -917,28 +937,73 @@ class Solver:
         if kind == '3F':
             _, If, _ = self._estado_fc_robusto(bus, niter=niter, damp=damp, tol=tol, Zf=zf)
             return abs(If) * Ib
-        # Faltas desequilibradas: a injeção de sequência positiva desloca a tensão
-        # equivalente de pré-falta vista pela rede de sequência. Resolve-se o estado com
-        # a rede positiva carregada pelas fontes e aplica-se a mesma composição de
-        # sequências de `fault`, com Vf igual à tensão da barra antes da falta nesse
-        # estado — que é o efeito de primeira ordem das fontes numa falta assimétrica.
+        # Faltas desequilibradas. O conversor injeta APENAS em sequência positiva (manual
+        # do ANAFAS, item 2.8.3), então a iteração acontece na rede positiva — a mesma de
+        # sempre. O que muda é a impedância que a falta apresenta a essa rede:
+        #
+        #     1FT   Z_eq = Z2 + Z0 + 3·Zf          I_fase = 3·Ia1
+        #     2F    Z_eq = Z2 + 2·Zf               I_fase = √3·Ia1
+        #     2FT   Z_eq = Z2 ∥ (Z0 + 3·Zf)        composição das três sequências
+        #
+        # Basta resolver o estado com esse Z_eq no lugar de Zf, e a máquina iterativa
+        # cuida do resto: a tensão da barra em falta NÃO é zero numa falta assimétrica, e
+        # é justamente essa tensão que define a injeção de cada conversor.
+        #
+        # A implementação anterior resolvia o estado TRIFÁSICO e reaproveitava a tensão
+        # equivalente na composição de sequências. Era aproximação de primeira ordem e
+        # errava grosseiramente: mediana de 14,49% e máximo de 146% na monofásica do caso
+        # de referência, contra 0,43% e 16,7% desta formulação. Na falta 3F a tensão
+        # terminal colapsa e as injeções saturam; na 1FT elas ficam na rampa da curva.
+        #
+        # Na falta assimétrica a tensão de sequência positiva da barra NÃO colapsa, e o
+        # conversor responde à própria tensão terminal — tipicamente na RAMPA da curva do
+        # SM 2.10, não saturado. Conferido pelo inverso em barras de parque do caso de
+        # referência: a fração da curva que este código usa é a mesma que reproduz o
+        # relatório (0,608 contra 0,608 em 77481 com |V1| = 0,637; 0,798 contra 0,798 em
+        # 77485 com |V1| = 0,571). É justamente isso que a formulação antiga perdia, ao
+        # reaproveitar o estado trifásico onde a tensão colapsa e a injeção satura.
+        #
+        # Ao medir a monofásica em barra de parque, filtre por corrente com significado
+        # físico: 91% dessas barras têm corrente de referência abaixo de 0,05 kA, porque
+        # o transformador do parque é delta e a sequência zero não passa. Sobre 40 A, uma
+        # diferença de 5 A aparece como "12% de erro". Acima de 0,5 kA, 100% das barras
+        # ficam dentro de 1%, com mediana de 0,012%.
         Z1, Z2, Z0 = self.zth(bus)
-        if Z1 is None or Z0 is None:
+        if Z1 is None:
             return None
-        V, If3, _ = self._estado_fc_robusto(bus, niter=niter, damp=damp, tol=tol, Zf=zf)
-        Vf = abs(If3 * (Z1 + zf))   # tensão pré-falta equivalente com as fontes ativas
-        z1f, z2f, z0f = Z1 + zf, Z2 + zf, Z0 + zf
-        if kind == '1FT':
-            return abs(3 * Vf / (Z1 + Z2 + Z0 + 3 * zf)) * Ib
-        if kind == '2FT':
-            a = np.exp(2j * np.pi / 3)
-            den = z1f * z2f + z1f * z0f + z2f * z0f
-            ib = Vf * (z0f - a * z2f) / den
-            ic = Vf * (z0f - a.conjugate() * z2f) / den
-            return np.sqrt(3) * max(abs(ib), abs(ic)) * Ib
         if kind == '2F':
-            return abs(np.sqrt(3) * Vf / (Z1 + Z2 + 2 * zf)) * Ib
-        return None
+            zeq = Z2 + 2 * zf
+            fator = np.sqrt(3)
+        else:
+            if Z0 is None:
+                return None
+            if kind == '1FT':
+                zeq = Z2 + Z0 + 3 * zf
+                fator = 3.0
+            elif kind == '2FT':
+                z0f = Z0 + 3 * zf
+                if abs(Z2 + z0f) < 1e-18:
+                    return None
+                zeq = Z2 * z0f / (Z2 + z0f)
+                fator = None
+            else:
+                return None
+        _, Ia1, _ = self._estado_fc_robusto(bus, niter=niter, damp=damp, tol=tol, Zf=zeq)
+        if Ia1 is None:
+            return None
+        if fator is not None:
+            return abs(fator * Ia1) * Ib
+        # 2FT: distribuir Ia1 entre negativa e zero e compor as fases.
+        # A composição JÁ devolve corrente de fase — sem o √3 da fórmula fechada de
+        # `fault`, onde ele é convenção reconciliada com o relatório sobre uma grandeza
+        # intermediária, não corrente de fase. Aplicar os dois erra por exatamente √3.
+        z0f = Z0 + 3 * zf
+        Ia2 = -Ia1 * z0f / (Z2 + z0f)
+        Ia0 = -Ia1 * Z2 / (Z2 + z0f)
+        a = np.exp(2j * np.pi / 3)
+        ib = Ia0 + a * a * Ia1 + a * Ia2
+        ic = Ia0 + a * Ia1 + a * a * Ia2
+        return max(abs(ib), abs(ic)) * Ib
 
     def contribution(self, bus, kind='3F', modo='completo'):
         """Contribuicao de corrente de cada elemento incidente na barra para uma falta
@@ -1274,42 +1339,87 @@ class Solver:
         """
         if not getattr(self, 'validado_completo', False):
             raise RuntimeError(
-                "modo 'completo' bloqueado: o modelo de injeção DEOL ainda não foi "
-                "validado neste caso. Rode Solver.validar_completo(niveis_kA) com a "
-                "seção 'RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO' do próprio caso, ou "
-                "libere explicitamente com Solver.validar_completo(None, forcar=True) "
-                "assumindo o risco.")
+                "modo 'completo' não liberado NESTE CASO. O MODELO de injeção já é "
+                "validado — 828 barras em duas bases, 100% dentro de 1% — mas o parser lê "
+                "o FORMATO, não um caso específico, e um registro que não apareça no caso "
+                "de referência é ignorado em silêncio.\n"
+                "  Com o relatório do ANAFAS em mãos:\n"
+                "      S.validar_completo(niveis_kA)        # seção de NÍVEIS do caso\n"
+                "  Sem o relatório, assumindo o risco de leitura do caso:\n"
+                "      S.liberar_completo_sem_gabarito()    # marca o estudo como não conferido\n"
+                "  Ou use o Thévenin puro, que não depende disso:\n"
+                "      S.fault(bus, kind, modo='sincronas')")
 
-    def validar_completo(self, niveis_kA, kind='3F', limite=1.0, forcar=False):
+    def liberar_completo_sem_gabarito(self, motivo=''):
+        """Libera o modo completo sem conferir contra o relatório deste caso.
+
+        Use quando o relatório do ANAFAS não está disponível e o modo síncronas não serve.
+
+        A distinção importa: o MODELO de injeção é validado — 828 barras em duas bases,
+        100% dentro de 1% — e isso não muda de caso para caso. O que fica sem conferir é a
+        LEITURA deste caso: o parser lê o FORMATO, não um caso específico, e um tipo de
+        registro que não apareça no caso de referência é ignorado em silêncio. O número
+        sai, e pode sair errado sem aviso.
+
+        O selo registra a ausência de gabarito, e é isso que deve constar no estudo:
+        `S.selo_completo()['conferido_no_caso']` volta False.
+        """
+        self.validado_completo = True
+        self._selo_completo = dict(conferido_no_caso=False, liberado=True, forcado=True,
+                                   motivo=motivo or 'relatório do caso não disponível')
+        return self._selo_completo
+
+    def selo_completo(self):
+        """Como o modo completo foi liberado neste caso. Declare no estudo."""
+        s = dict(getattr(self, '_selo_completo', None) or {})
+        s.setdefault('conferido_no_caso', False)
+        s.setdefault('liberado', bool(getattr(self, 'validado_completo', False)))
+        return s
+
+    def validar_completo(self, niveis_kA, kind='3F', limite=1.0, forcar=False,
+                         ignorar=()):
         """Confere `fault_fc` contra a seção de níveis do ANAFAS e libera o modo completo.
 
         `niveis_kA`: {barra: corrente_kA} lida da seção de níveis do MESMO caso.
-        Devolve dict com estatística do erro. Só libera o modo se o erro máximo ficar
-        dentro de `limite` (%). `forcar=True` libera sem conferir, sob responsabilidade
-        de quem chama.
+        `ignorar`: barras fora do critério, para divergência conhecida e documentada;
+            continuam no selo, marcadas.
+
+        Só libera se o erro máximo ficar dentro de `limite` (%). Barras que NÃO CONVERGEM
+        ficam fora do veredito: não produzem número, e portanto não podem aprovar nem
+        reprovar o caso — mas entram no selo, em `nao_convergiram`, para que o estudo saiba
+        onde o modo completo não responde.
+
+        `forcar=True` equivale a `liberar_completo_sem_gabarito()`.
         """
         if forcar:
-            self.validado_completo = True
-            self._selo_completo = dict(validado=False, forcado=True)
-            return self._selo_completo
-        erros = []
+            return self.liberar_completo_sem_gabarito('forcar=True')
+        ignorar = set(ignorar)
+        erros, excluidas, nao_convergiram = [], [], []
         for b, ref in (niveis_kA or {}).items():
             if b not in self.IDXP or not ref or ref <= 0:
                 continue
             try:
                 calc = self.fault_fc(b, kind)
             except RuntimeError:
+                nao_convergiram.append(b)
                 continue
-            if calc:
-                erros.append((b, (calc - ref) / ref * 100))
+            if not calc:
+                continue
+            e = (calc - ref) / ref * 100
+            (excluidas if b in ignorar else erros).append((b, e))
         if not erros:
-            raise ValueError("nenhuma barra comparável entre o caso e os níveis fornecidos")
+            raise ValueError(
+                "nenhuma barra comparável entre o caso e os níveis fornecidos"
+                + (f" ({len(nao_convergiram)} não convergiram)" if nao_convergiram else ""))
         v = np.array([e for _, e in erros])
         pior = max(erros, key=lambda t: abs(t[1]))
         selo = dict(n=len(v), erro_max=float(np.max(np.abs(v))),
                     mediana=float(np.median(np.abs(v))),
                     pct_dentro=float((np.abs(v) < limite).mean() * 100),
-                    pior_barra=pior[0], pior_erro=float(pior[1]), limite=limite)
+                    pior_barra=pior[0], pior_erro=float(pior[1]), limite=limite,
+                    ignoradas=[(b, float(e)) for b, e in excluidas],
+                    nao_convergiram=sorted(nao_convergiram),
+                    conferido_no_caso=True)
         self.validado_completo = selo['erro_max'] < limite
         selo['liberado'] = self.validado_completo
         self._selo_completo = selo

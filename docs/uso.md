@@ -245,6 +245,23 @@ desvio do `line_end_open`, porque a função remove a linha e a capacitância sa
   contribui só em sequência positiva (manual do ANAFAS, item 2.8.3), o que o relatório de
   falta monofásica confirma.
 
+### Ao medir a monofásica em barra de parque
+
+91% das barras com fonte de conversor têm corrente monofásica de referência **abaixo de
+0,05 kA**: o transformador do parque é delta e a sequência zero não passa. Sobre 40 A, uma
+diferença de 5 A aparece como "12% de erro" e contamina qualquer estatística agregada.
+
+Filtre por corrente com significado físico antes de concluir:
+
+| Filtro | n | < 1% | mediana |
+|---|---|---|---|
+| sem filtro | 372 | 8,1% | 11,52% |
+| > 0,1 kA | 31 | 96,8% | 0,015% |
+| **> 0,5 kA** | 30 | **100,0%** | **0,012%** |
+
+É o que separa erro de modelo de artefato de denominador pequeno — e vale para qualquer
+conciliação, não só esta.
+
 ### Do `line_end_open`
 
 Erro conhecido contra o ANAFAS no caso de referência: **−4,11% em falta trifásica** e −0,41%

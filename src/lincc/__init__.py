@@ -7,7 +7,47 @@ por fatoração LU esparsa.
 NÃO substitui ferramenta homologada. Ver README para isenção de responsabilidade.
 
 ═══════════════════════════════════════════════════════════════════════════════════════
-LEIA ANTES DE USAR — dois modos, e a escolha muda o resultado
+PROTOCOLO DE TRABALHO — vale para toda chamada, sem precisar ser repetido no pedido
+═══════════════════════════════════════════════════════════════════════════════════════
+
+1. Este motor é a fonte de verdade. Importe e use; não recrie a modelagem de memória, não
+   reescreva o parser, não calcule nada à mão. Todo número de um estudo sai daqui.
+
+2. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
+   capacidade de interrupção e carga máxima operativa NÃO estão no .ANA. As funções de
+   alto nível devolvem `dados_faltantes` com o que falta e o critério que cada item
+   bloqueia — reporte a lista em vez de estimar.
+
+3. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
+   conectadas por conversor; 'sincronas' é o Thévenin puro. Perto dessas usinas a
+   diferença passa de 40%. Não misture os dois num mesmo critério.
+
+4. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
+   primária do TC, não a do equipamento protegido.
+
+5. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
+   banco de três enrolamentos exige remover TODAS as pernas do nó-estrela; e se o
+   equipamento novo já está na base, o cenário "antes" é o contrafactual — remova-o.
+
+FUNÇÕES DE ALTO NÍVEL — resolvem o estudo inteiro numa chamada
+
+    impacto_entrada(M, [(bf, bt, nc)])        evolução de curto pela entrada de um
+                                              equipamento, nos quatro tipos de defeito,
+                                              com as barras acima do gatilho de 10% e o
+                                              tipo que governou
+
+    relatorio_curto(M, barra)                 correntes, Thévenin e contribuições
+
+    relatorio_protecao(M, tipo, elemento)     tipo: 'linha', 'transformador', 'barra',
+                                              'reator' ou 'capacitor'. Traz as grandezas
+                                              do tipo, N-1, as funções que o Submódulo
+                                              2.11 exige e os dados faltantes
+
+Elas embutem o protocolo acima. Um pedido não precisa enumerar tipos de defeito,
+contingências nem formato de saída.
+
+═══════════════════════════════════════════════════════════════════════════════════════
+OS DOIS MODOS — a escolha muda o resultado
 ═══════════════════════════════════════════════════════════════════════════════════════
 
     M = AnaModel("caso.ANA");  S = Solver(M);  S.factor()
@@ -51,7 +91,8 @@ from .parser_anafas import AnaModel                    # base de curto-circuito 
 from .parser_anarede import PwfModel, conciliar_bases  # base de fluxo de potência (.PWF)
 from .solver import Solver, branches_at                # motor de curto-circuito
 from .protecao import (recomposicao_87b,               # motor de proteção
-                       envelope_contribuicoes, tabela_envelope)
+                       envelope_contribuicoes, tabela_envelope,
+                       impacto_entrada, relatorio_curto, relatorio_protecao)
 
 __version__ = "0.3.0"
 __all__ = [
@@ -61,6 +102,7 @@ __all__ = [
     "Solver", "branches_at",
     # motor de proteção
     "recomposicao_87b", "envelope_contribuicoes", "tabela_envelope",
+    "impacto_entrada", "relatorio_curto", "relatorio_protecao",
     # motor de fluxo de potência
     "fluxo",
     # apoio
@@ -135,8 +177,16 @@ LINCC — guia de modos, tolerância e limitações conhecidas
       RuntimeError em vez de devolver valor. É proposital: valor derivado de iteração
       não convergida não deve entrar em estudo.
 
-   b) Nenhum resíduo material conhecido no caso de referência: todas as barras que
-      convergem ficam abaixo de 1%, com máximo de 0,92%.
+   b) Nenhum resíduo material conhecido no caso de referência, nos quatro tipos de
+      defeito. Trifásica e bifásica-terra: 100,000% das barras que convergem abaixo de 1%.
+      Monofásica: 100,000% das barras com corrente acima de 0,5 kA, mediana 0,012%.
+
+      ATENÇÃO ao avaliar a monofásica em barra de parque: 91% das barras com fonte DEOL
+      têm corrente monofásica de referência ABAIXO DE 0,05 kA, porque o transformador do
+      parque é delta e a sequência zero não passa. Sobre 40 A, uma diferença de 5 A vira
+      "12% de erro" e contamina qualquer estatística agregada. Filtre por corrente com
+      significado físico antes de concluir — é o que separa erro de modelo de artefato de
+      denominador pequeno.
 
    c) Capacitância de linha (charging). Existe como opção, `Solver(M, charging=True)`,
       mas fica DESLIGADA por padrão: o gabarito de impedância de barra do ANAFAS não a

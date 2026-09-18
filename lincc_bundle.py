@@ -1305,6 +1305,7 @@ class Solver:
         # Ela basta enquanto |Z_transferência| < |Z_Thévenin|; um banco com reatância
         # negativa inverte essa relação e o Newton complexo entra em ciclo limite, com o
         # resíduo estacionando num patamar. Em coordenadas reais o Jacobiano é exato.
+        passo_base = damp
         Zr, Zi = Zf.real, Zf.imag
         B = np.block([[Zr, -Zi], [Zi, Zr]])          # d(Vre,Vim)/d(Ire,Iim)
         Id2 = np.eye(2 * n)
@@ -1349,7 +1350,26 @@ class Solver:
             except np.linalg.LinAlgError:
                 d = gr                                  # singular: passo de Picard
             dI = d[:n] + 1j * d[n:]
-            Ivec = Ivec + damp * dI
+            # PASSO ADAPTATIVO. O passo cheio de Newton diverge quando as fontes estão
+            # fortemente acopladas entre si — na barra 45019 do caso de referência o
+            # acoplamento fora da diagonal de Zf chega a 31x a diagonal, e com damp=1,0 o
+            # resíduo sobe a 7,9 pu. Reduzir o passo faz convergir para o mesmo valor
+            # (23,149 kA com damp de 0,5 a 0,1), então é instabilidade do passo, não
+            # ausência de solução. Aceita-se o fator que reduza o resíduo; se nenhum
+            # reduzir, o menor evita o salto que divergiria.
+            passo, melhor_res, melhor = passo_base, res, None
+            for fator in (passo_base, passo_base / 2, passo_base / 4,
+                          passo_base / 8, passo_base / 16):
+                cand = Ivec + fator * dI
+                Vc = Vth + Zf @ cand
+                gc = np.array([sum(self._inj_fc(r, Vc[c], angs[c]) for r in ativos[c][2])
+                               for c in range(n)], dtype=complex) - cand
+                rc = float(np.max(np.abs(gc)))
+                if melhor is None or rc < melhor_res:
+                    melhor_res, melhor, passo = rc, cand, fator
+                if rc < res:
+                    break
+            Ivec = melhor if melhor is not None else Ivec + (passo_base / 16) * dI
         Ieol = np.zeros(N, dtype=complex)
         Ieol[idxs] = Ivec
         V, If = resolver(Ieol)
@@ -1405,28 +1425,73 @@ class Solver:
         if kind == '3F':
             _, If, _ = self._estado_fc_robusto(bus, niter=niter, damp=damp, tol=tol, Zf=zf)
             return abs(If) * Ib
-        # Faltas desequilibradas: a injeção de sequência positiva desloca a tensão
-        # equivalente de pré-falta vista pela rede de sequência. Resolve-se o estado com
-        # a rede positiva carregada pelas fontes e aplica-se a mesma composição de
-        # sequências de `fault`, com Vf igual à tensão da barra antes da falta nesse
-        # estado — que é o efeito de primeira ordem das fontes numa falta assimétrica.
+        # Faltas desequilibradas. O conversor injeta APENAS em sequência positiva (manual
+        # do ANAFAS, item 2.8.3), então a iteração acontece na rede positiva — a mesma de
+        # sempre. O que muda é a impedância que a falta apresenta a essa rede:
+        #
+        #     1FT   Z_eq = Z2 + Z0 + 3·Zf          I_fase = 3·Ia1
+        #     2F    Z_eq = Z2 + 2·Zf               I_fase = √3·Ia1
+        #     2FT   Z_eq = Z2 ∥ (Z0 + 3·Zf)        composição das três sequências
+        #
+        # Basta resolver o estado com esse Z_eq no lugar de Zf, e a máquina iterativa
+        # cuida do resto: a tensão da barra em falta NÃO é zero numa falta assimétrica, e
+        # é justamente essa tensão que define a injeção de cada conversor.
+        #
+        # A implementação anterior resolvia o estado TRIFÁSICO e reaproveitava a tensão
+        # equivalente na composição de sequências. Era aproximação de primeira ordem e
+        # errava grosseiramente: mediana de 14,49% e máximo de 146% na monofásica do caso
+        # de referência, contra 0,43% e 16,7% desta formulação. Na falta 3F a tensão
+        # terminal colapsa e as injeções saturam; na 1FT elas ficam na rampa da curva.
+        #
+        # Na falta assimétrica a tensão de sequência positiva da barra NÃO colapsa, e o
+        # conversor responde à própria tensão terminal — tipicamente na RAMPA da curva do
+        # SM 2.10, não saturado. Conferido pelo inverso em barras de parque do caso de
+        # referência: a fração da curva que este código usa é a mesma que reproduz o
+        # relatório (0,608 contra 0,608 em 77481 com |V1| = 0,637; 0,798 contra 0,798 em
+        # 77485 com |V1| = 0,571). É justamente isso que a formulação antiga perdia, ao
+        # reaproveitar o estado trifásico onde a tensão colapsa e a injeção satura.
+        #
+        # Ao medir a monofásica em barra de parque, filtre por corrente com significado
+        # físico: 91% dessas barras têm corrente de referência abaixo de 0,05 kA, porque
+        # o transformador do parque é delta e a sequência zero não passa. Sobre 40 A, uma
+        # diferença de 5 A aparece como "12% de erro". Acima de 0,5 kA, 100% das barras
+        # ficam dentro de 1%, com mediana de 0,012%.
         Z1, Z2, Z0 = self.zth(bus)
-        if Z1 is None or Z0 is None:
+        if Z1 is None:
             return None
-        V, If3, _ = self._estado_fc_robusto(bus, niter=niter, damp=damp, tol=tol, Zf=zf)
-        Vf = abs(If3 * (Z1 + zf))   # tensão pré-falta equivalente com as fontes ativas
-        z1f, z2f, z0f = Z1 + zf, Z2 + zf, Z0 + zf
-        if kind == '1FT':
-            return abs(3 * Vf / (Z1 + Z2 + Z0 + 3 * zf)) * Ib
-        if kind == '2FT':
-            a = np.exp(2j * np.pi / 3)
-            den = z1f * z2f + z1f * z0f + z2f * z0f
-            ib = Vf * (z0f - a * z2f) / den
-            ic = Vf * (z0f - a.conjugate() * z2f) / den
-            return np.sqrt(3) * max(abs(ib), abs(ic)) * Ib
         if kind == '2F':
-            return abs(np.sqrt(3) * Vf / (Z1 + Z2 + 2 * zf)) * Ib
-        return None
+            zeq = Z2 + 2 * zf
+            fator = np.sqrt(3)
+        else:
+            if Z0 is None:
+                return None
+            if kind == '1FT':
+                zeq = Z2 + Z0 + 3 * zf
+                fator = 3.0
+            elif kind == '2FT':
+                z0f = Z0 + 3 * zf
+                if abs(Z2 + z0f) < 1e-18:
+                    return None
+                zeq = Z2 * z0f / (Z2 + z0f)
+                fator = None
+            else:
+                return None
+        _, Ia1, _ = self._estado_fc_robusto(bus, niter=niter, damp=damp, tol=tol, Zf=zeq)
+        if Ia1 is None:
+            return None
+        if fator is not None:
+            return abs(fator * Ia1) * Ib
+        # 2FT: distribuir Ia1 entre negativa e zero e compor as fases.
+        # A composição JÁ devolve corrente de fase — sem o √3 da fórmula fechada de
+        # `fault`, onde ele é convenção reconciliada com o relatório sobre uma grandeza
+        # intermediária, não corrente de fase. Aplicar os dois erra por exatamente √3.
+        z0f = Z0 + 3 * zf
+        Ia2 = -Ia1 * z0f / (Z2 + z0f)
+        Ia0 = -Ia1 * Z2 / (Z2 + z0f)
+        a = np.exp(2j * np.pi / 3)
+        ib = Ia0 + a * a * Ia1 + a * Ia2
+        ic = Ia0 + a * Ia1 + a * a * Ia2
+        return max(abs(ib), abs(ic)) * Ib
 
     def contribution(self, bus, kind='3F', modo='completo'):
         """Contribuicao de corrente de cada elemento incidente na barra para uma falta
@@ -1762,42 +1827,87 @@ class Solver:
         """
         if not getattr(self, 'validado_completo', False):
             raise RuntimeError(
-                "modo 'completo' bloqueado: o modelo de injeção DEOL ainda não foi "
-                "validado neste caso. Rode Solver.validar_completo(niveis_kA) com a "
-                "seção 'RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO' do próprio caso, ou "
-                "libere explicitamente com Solver.validar_completo(None, forcar=True) "
-                "assumindo o risco.")
+                "modo 'completo' não liberado NESTE CASO. O MODELO de injeção já é "
+                "validado — 828 barras em duas bases, 100% dentro de 1% — mas o parser lê "
+                "o FORMATO, não um caso específico, e um registro que não apareça no caso "
+                "de referência é ignorado em silêncio.\n"
+                "  Com o relatório do ANAFAS em mãos:\n"
+                "      S.validar_completo(niveis_kA)        # seção de NÍVEIS do caso\n"
+                "  Sem o relatório, assumindo o risco de leitura do caso:\n"
+                "      S.liberar_completo_sem_gabarito()    # marca o estudo como não conferido\n"
+                "  Ou use o Thévenin puro, que não depende disso:\n"
+                "      S.fault(bus, kind, modo='sincronas')")
 
-    def validar_completo(self, niveis_kA, kind='3F', limite=1.0, forcar=False):
+    def liberar_completo_sem_gabarito(self, motivo=''):
+        """Libera o modo completo sem conferir contra o relatório deste caso.
+
+        Use quando o relatório do ANAFAS não está disponível e o modo síncronas não serve.
+
+        A distinção importa: o MODELO de injeção é validado — 828 barras em duas bases,
+        100% dentro de 1% — e isso não muda de caso para caso. O que fica sem conferir é a
+        LEITURA deste caso: o parser lê o FORMATO, não um caso específico, e um tipo de
+        registro que não apareça no caso de referência é ignorado em silêncio. O número
+        sai, e pode sair errado sem aviso.
+
+        O selo registra a ausência de gabarito, e é isso que deve constar no estudo:
+        `S.selo_completo()['conferido_no_caso']` volta False.
+        """
+        self.validado_completo = True
+        self._selo_completo = dict(conferido_no_caso=False, liberado=True, forcado=True,
+                                   motivo=motivo or 'relatório do caso não disponível')
+        return self._selo_completo
+
+    def selo_completo(self):
+        """Como o modo completo foi liberado neste caso. Declare no estudo."""
+        s = dict(getattr(self, '_selo_completo', None) or {})
+        s.setdefault('conferido_no_caso', False)
+        s.setdefault('liberado', bool(getattr(self, 'validado_completo', False)))
+        return s
+
+    def validar_completo(self, niveis_kA, kind='3F', limite=1.0, forcar=False,
+                         ignorar=()):
         """Confere `fault_fc` contra a seção de níveis do ANAFAS e libera o modo completo.
 
         `niveis_kA`: {barra: corrente_kA} lida da seção de níveis do MESMO caso.
-        Devolve dict com estatística do erro. Só libera o modo se o erro máximo ficar
-        dentro de `limite` (%). `forcar=True` libera sem conferir, sob responsabilidade
-        de quem chama.
+        `ignorar`: barras fora do critério, para divergência conhecida e documentada;
+            continuam no selo, marcadas.
+
+        Só libera se o erro máximo ficar dentro de `limite` (%). Barras que NÃO CONVERGEM
+        ficam fora do veredito: não produzem número, e portanto não podem aprovar nem
+        reprovar o caso — mas entram no selo, em `nao_convergiram`, para que o estudo saiba
+        onde o modo completo não responde.
+
+        `forcar=True` equivale a `liberar_completo_sem_gabarito()`.
         """
         if forcar:
-            self.validado_completo = True
-            self._selo_completo = dict(validado=False, forcado=True)
-            return self._selo_completo
-        erros = []
+            return self.liberar_completo_sem_gabarito('forcar=True')
+        ignorar = set(ignorar)
+        erros, excluidas, nao_convergiram = [], [], []
         for b, ref in (niveis_kA or {}).items():
             if b not in self.IDXP or not ref or ref <= 0:
                 continue
             try:
                 calc = self.fault_fc(b, kind)
             except RuntimeError:
+                nao_convergiram.append(b)
                 continue
-            if calc:
-                erros.append((b, (calc - ref) / ref * 100))
+            if not calc:
+                continue
+            e = (calc - ref) / ref * 100
+            (excluidas if b in ignorar else erros).append((b, e))
         if not erros:
-            raise ValueError("nenhuma barra comparável entre o caso e os níveis fornecidos")
+            raise ValueError(
+                "nenhuma barra comparável entre o caso e os níveis fornecidos"
+                + (f" ({len(nao_convergiram)} não convergiram)" if nao_convergiram else ""))
         v = np.array([e for _, e in erros])
         pior = max(erros, key=lambda t: abs(t[1]))
         selo = dict(n=len(v), erro_max=float(np.max(np.abs(v))),
                     mediana=float(np.median(np.abs(v))),
                     pct_dentro=float((np.abs(v) < limite).mean() * 100),
-                    pior_barra=pior[0], pior_erro=float(pior[1]), limite=limite)
+                    pior_barra=pior[0], pior_erro=float(pior[1]), limite=limite,
+                    ignoradas=[(b, float(e)) for b, e in excluidas],
+                    nao_convergiram=sorted(nao_convergiram),
+                    conferido_no_caso=True)
         self.validado_completo = selo['erro_max'] < limite
         selo['liberado'] = self.validado_completo
         self._selo_completo = selo
@@ -1901,7 +2011,7 @@ def branches_at(model, bus, tipos=('L','T')):
 
 # ===================== motor de protecao =====================
 
-def recomposicao_87b(model, bus, kinds=('3F','1FT')):
+def recomposicao_87b(model, bus, kinds=('3F','1FT'), modo='sincronas'):
     """ICC_MIN de recomposicao para 87B: falta na barra energizada por UM elemento de cada vez.
     Para cada ramo (L ou perna 138 de banco de trafo) incidente na barra, isola a barra a esse
     unico elemento (dropa todos os demais incidentes) e calcula a falta. Retorna
@@ -1911,10 +2021,15 @@ def recomposicao_87b(model, bus, kinds=('3F','1FT')):
     tab=[]; mins={k:float('inf') for k in kinds}
     for keep in inc:
         drop=[b for b in inc if b!=keep]
-        S=Solver(model, drop_branches=drop); S.factor()
+        S=Solver(model, drop_branches=drop); S.factor(avisar=False)
+        if modo=='completo':
+            # A recomposição monta dezenas de cenários; cada um é um Solver novo, e o
+            # bloqueio do modo completo é por instância. Propaga-se a liberação, porque a
+            # decisão de usar o modo completo foi tomada por quem chamou.
+            S.liberar_completo_sem_gabarito('cenário interno de recomposição')
         vals={}
         for k in kinds:
-            I=S.fault(bus, kind=k)
+            I=S.fault(bus, kind=k, modo=modo)
             vals[k]=I
             if I is not None and I>1e-3: mins[k]=min(mins[k], I)
         br=next(b for b in model.branches if (b['bf'],b['bt'],b['nc'])==keep)
@@ -2054,6 +2169,234 @@ def tabela_envelope(env, model=None, largura=46):
                 val, cen = d[campo][extremo]
                 linhas.append(f"     {rot:<10} {extremo:>3}: {val:9.3f}   {cen[:largura]}")
     return '\n'.join(linhas)
+
+
+
+# ====================================================================== #
+#  Funções de alto nível                                                 #
+#                                                                        #
+#  Encapsulam os estudos recorrentes para que o pedido possa ser curto:   #
+#  o protocolo — quais tipos de defeito, quais contingências, o que       #
+#  declarar, o que não estimar — fica AQUI, e não no prompt do usuário.   #
+# ====================================================================== #
+
+_KINDS = ('3F', '1FT', '2F', '2FT')
+
+
+def _solver(model, drop=None, modo='sincronas'):
+    # avisar=False: numa chamada de alto nível o aviso apareceria uma vez por cenário
+    # interno — o relatório declara o modo no retorno, que é onde interessa.
+    S = Solver(model, drop_branches=list(drop) if drop else None)
+    S.factor(avisar=False)
+    if modo == 'completo':
+        S.liberar_completo_sem_gabarito('chamada de alto nível sem gabarito do caso')
+    return S
+
+
+def impacto_entrada(model, ramos, limiar=10.0, kinds=_KINDS, kv_min=69.0,
+                    modo='sincronas', i_min_kA=0.1):
+    """Impacto da entrada em operação de um equipamento na evolução de curto-circuito.
+
+    `ramos` são os ramos do equipamento NOVO, como [(bf, bt, nc), ...]. Se o equipamento
+    já está representado na base — o caso usual em horizonte de planejamento — o cenário
+    "antes" é o contrafactual: os ramos são removidos. Um banco de três enrolamentos exige
+    TODAS as pernas do nó-estrela na lista, senão o equipamento continua parcialmente
+    conectado e o resultado não significa nada.
+
+    Varre as barras de `kv_min` para cima nos quatro tipos de defeito e devolve as que
+    variam `limiar` % ou mais, com o tipo que governou. Barras abaixo de `i_min_kA` são
+    ignoradas: ali o percentual não tem significado físico.
+
+    Devolve dict com 'barras' (lista ordenada pela maior variação), 'limiar', 'modo' e
+    'n_avaliadas'. Cada barra traz: num, nome, kv, antes, depois, variacao_pct, kind.
+
+    O gatilho de 10% é o usual para exigir revisão dos estudos de proteção existentes.
+    """
+    ramos = [(int(a), int(b), str(c)) for a, b, c in ramos]
+    S_com = _solver(model, None, modo)
+    S_sem = _solver(model, ramos, modo)
+    alvo = [b for b, kv in model.bus_kv.items() if kv and kv >= kv_min]
+    saida = []
+    for b in alvo:
+        pior = None
+        for kind in kinds:
+            try:
+                a = S_sem.fault(b, kind, modo=modo)
+                c = S_com.fault(b, kind, modo=modo)
+            except Exception:
+                continue
+            if not a or not c or a < i_min_kA:
+                continue
+            d = (c - a) / a * 100.0
+            if pior is None or abs(d) > abs(pior[0]):
+                pior = (d, kind, a, c)
+        if pior and abs(pior[0]) >= limiar:
+            saida.append(dict(num=b, nome=model.bus_name.get(b, ''), kv=model.bus_kv[b],
+                              antes=pior[2], depois=pior[3], variacao_pct=pior[0],
+                              kind=pior[1]))
+    saida.sort(key=lambda d: -abs(d['variacao_pct']))
+    return dict(barras=saida, limiar=limiar, modo=modo, n_avaliadas=len(alvo),
+                ramos=ramos)
+
+
+def relatorio_curto(model, barra, kinds=_KINDS, modo='sincronas', solver=None):
+    """Relatório de curto-circuito de uma barra: correntes, Thévenin e contribuições.
+
+    Devolve dict com 'correntes' {kind: kA}, 'zth' (Z1, Z2, Z0 em pu), 'contribuicoes'
+    {(tipo,bf,bt,nc): kA} e 'modo'. É o bloco básico sobre o qual os relatórios de
+    proteção são montados.
+    """
+    S = solver or _solver(model, None, modo)
+    out = dict(barra=barra, nome=model.bus_name.get(barra, ''),
+               kv=model.bus_kv.get(barra), modo=modo, correntes={}, avisos=[])
+    for kind in kinds:
+        try:
+            out['correntes'][kind] = S.fault(barra, kind, modo=modo)
+        except Exception as e:
+            out['avisos'].append(f"{kind}: {type(e).__name__} — {str(e)[:80]}")
+    z = S.zth(barra)
+    out['zth'] = dict(Z1=z[0], Z2=z[1], Z0=z[2]) if z and z[0] is not None else None
+    try:
+        out['contribuicoes'] = S.contribution(barra, '3F', modo=modo)
+    except Exception:
+        out['contribuicoes'] = {}
+    return out
+
+
+def _ramos_incidentes(model, bus):
+    """Ramos incidentes na barra como [(bf, bt, nc), ...], independente do formato que
+    `branches_at` devolva."""
+    out = []
+    for x in branches_at(model, bus):
+        if isinstance(x, dict):
+            out.append((x['bf'], x['bt'], str(x['nc'])))
+        else:
+            t = tuple(x)
+            # aceita (tipo,bf,bt,nc) ou (bf,bt,nc)
+            if len(t) >= 4 and isinstance(t[0], str):
+                out.append((t[1], t[2], str(t[3])))
+            elif len(t) >= 3:
+                out.append((t[0], t[1], str(t[2])))
+    return out
+
+
+def _k0(br):
+    """Fator de compensação de sequência zero: k0 = (Z0L − Z1L) / (3·Z1L)."""
+    z1 = zfin(br.get('R1'), br.get('X1'))
+    z0 = zfin(br.get('R0'), br.get('X0'))
+    if z1 is None or z0 is None or abs(z1) < 1e-12:
+        return None
+    return (z0 - z1) / (3 * z1)
+
+
+def relatorio_protecao(model, tipo, elemento, modo='sincronas', dados=None,
+                       kinds=_KINDS, n1=True):
+    """Relatório de proteção de um equipamento: linha, transformador, barra, reator ou
+    capacitor série.
+
+    `elemento` é (bf, bt, nc) para linha, transformador e capacitor; o número da barra
+    para barra; e (barra, nc) ou a barra para reator. `dados` são os valores externos que
+    o usuário já tem (relação de TC, placa, carga máxima); o que faltar é listado, não
+    estimado.
+
+    Monta, conforme o tipo:
+
+      linha         correntes nos dois terminais, falta com terminal remoto aberto em
+                    várias posições, Z1, Z0 e k0, e N-1 na barra local
+      transformador passa-através por enrolamento, correntes nas barras dos dois lados —
+                    o 50 precisa ser sensível na local e insensível na do outro lado
+      barra         envelope por bay com o cenário de cada extremo e ICC_MIN de recomposição
+      reator        correntes no ponto de conexão e falta intermediária no reator
+      capacitor     correntes nos terminais, para avaliar sub e sobrealcance de distância
+
+    Devolve dict com as grandezas, as funções que o Submódulo 2.11 exige para o tipo, e
+    'dados_faltantes' — o que o .ANA não contém e o critério que cada um bloqueia.
+
+    NÃO produz ajuste. Produz os insumos: o ajuste depende de critério, e critério é
+    decisão de engenharia, declarada pelo usuário.
+    """
+    from .sm211 import funcoes_exigidas
+    from .dados_externos import faltantes, RELATORIO
+    S = _solver(model, None, modo)
+    out = dict(tipo=tipo, elemento=elemento, modo=modo, grandezas={}, avisos=[])
+
+    if tipo == 'barra':
+        b = int(elemento if not isinstance(elemento, (tuple, list)) else elemento[0])
+        out['grandezas']['curto_na_barra'] = relatorio_curto(model, b, kinds, modo, S)
+        out['grandezas']['envelope_por_bay'] = envelope_contribuicoes(model, b, kinds,
+                                                                      solver=S)
+        try:
+            tabela, icc_min = recomposicao_87b(model, b, modo=modo)
+            out['grandezas']['recomposicao'] = dict(por_elemento=tabela, icc_min=icc_min)
+        except Exception as e:
+            out['avisos'].append(f"recomposição: {str(e)[:80]}")
+        chave_dados = 'barra'
+
+    elif tipo in ('linha', 'transformador', 'capacitor'):
+        bf, bt, nc = (list(elemento) + ['1'])[:3]
+        bf, bt, nc = int(bf), int(bt), str(nc)
+        br = S._find_branch(bf, bt, nc)
+        if br is None:
+            raise ValueError(f"elemento {bf}-{bt}/{nc} não existe na base")
+        out['grandezas']['Z1'] = zfin(br.get('R1'), br.get('X1'))
+        out['grandezas']['Z0'] = zfin(br.get('R0'), br.get('X0'))
+        out['grandezas']['k0'] = _k0(br)
+        out['grandezas']['MVA_nominal'] = br.get('MVA')
+        for rot, b in (('terminal_local', bf), ('terminal_remoto', bt)):
+            out['grandezas'][f'curto_{rot}'] = relatorio_curto(model, b, kinds, modo, S)
+        if tipo == 'linha':
+            try:
+                out['grandezas']['terminal_remoto_aberto'] = \
+                    S.varredura_line_end_open(bf, bt, nc, bf, kinds)
+            except Exception as e:
+                out['avisos'].append(f"terminal aberto: {str(e)[:80]}")
+        if tipo == 'transformador':
+            for rot, b in (('local', bf), ('outro_lado', bt)):
+                try:
+                    out['grandezas'][f'passa_atraves_{rot}'] = \
+                        S.contribution(b, '3F', modo=modo).get(
+                            (br['tipo'], bf, bt, nc))
+                except Exception:
+                    pass
+        if n1:
+            viz = [r for r in _ramos_incidentes(model, bf) if r != (bf, bt, nc)]
+            n1_out = {}
+            for r in viz:
+                try:
+                    Sn = _solver(model, [r], modo)
+                    n1_out[f"sem {r[0]}-{r[1]}/{r[2]}"] = {
+                        k: Sn.fault(bf, k, modo=modo) for k in kinds}
+                except Exception:
+                    continue
+            out['grandezas']['n_1_no_terminal_local'] = n1_out
+        chave_dados = {'linha': 'linha', 'transformador': 'transformador',
+                       'capacitor': 'linha'}[tipo]
+
+    elif tipo == 'reator':
+        b = int(elemento[0] if isinstance(elemento, (tuple, list)) else elemento)
+        out['grandezas']['curto_no_ponto_de_conexao'] = relatorio_curto(model, b, kinds,
+                                                                        modo, S)
+        interm = {}
+        for frac in (0.1, 0.25, 0.5, 0.75, 0.9):
+            try:
+                interm[frac] = S.fault_on_shunt(b, frac, '1FT')
+            except Exception:
+                continue
+        if interm:
+            out['grandezas']['falta_intermediaria_no_reator'] = interm
+        chave_dados = 'reator'
+    else:
+        raise ValueError("tipo deve ser linha, transformador, barra, reator ou capacitor")
+
+    out['funcoes_sm211'] = funcoes_exigidas(
+        tipo if tipo in ('linha', 'transformador', 'reator', 'barra') else 'linha')
+    falta = faltantes(chave_dados, dados,
+                      model=model if tipo != 'barra' and tipo != 'reator' else None,
+                      elemento=(int(elemento[0]), int(elemento[1]), str(elemento[2]))
+                      if tipo in ('linha', 'transformador', 'capacitor') else None)
+    out['dados_faltantes'] = falta
+    out['dados_faltantes_texto'] = RELATORIO(falta, tipo)
+    return out
 
 
 # ===================== motor de fluxo de potencia =====================

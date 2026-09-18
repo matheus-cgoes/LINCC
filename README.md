@@ -71,12 +71,39 @@ a respeito. Detalhes de operação, validação de caso novo e escolha de toler�
 [`docs/uso.md`](docs/uso.md).
 
 **Primeira vez?** [`examples/prompt-demonstracao.md`](examples/prompt-demonstracao.md) traz
-um prompt completo e comentado: impacto da entrada de uma LT, barras com variação acima de
-10%, e o relatório de curto-circuito de uma barra com as correntes que a proteção usa.
+um pedido curto e o que ele produz. O protocolo de trabalho está na docstring de `lincc` e
+embutido nas funções de alto nível, então não precisa ser repetido no prompt.
 
 ---
 
 ## Exemplos
+
+### Estudos completos numa chamada
+
+As funções de alto nível embutem o protocolo — quais tipos de defeito varrer, quais
+contingências, o que declarar, o que não estimar. O pedido pode ser curto.
+
+```python
+from lincc import AnaModel, impacto_entrada, relatorio_protecao, relatorio_curto
+
+M = AnaModel("caso.ANA")
+
+# evolução de curto pela entrada de um equipamento, nos quatro tipos de defeito,
+# com as barras acima do gatilho de 10% e o tipo que governou
+impacto_entrada(M, [(BF, BT, NC)])
+
+# relatório de proteção: 'linha', 'transformador', 'barra', 'reator' ou 'capacitor'
+relatorio_protecao(M, 'linha', (BF, BT, NC))
+relatorio_protecao(M, 'barra', BARRA)
+
+# correntes, Thévenin e contribuições de uma barra
+relatorio_curto(M, BARRA)
+```
+
+Cada relatório traz as grandezas do tipo, os cenários N-1, as funções que o Submódulo 2.11
+exige e **o que falta** — relação de TC, placa, carga máxima — em vez de estimar.
+
+Exemplo comentado: [`examples/prompt-demonstracao.md`](examples/prompt-demonstracao.md).
 
 ### Corrente de falta
 
