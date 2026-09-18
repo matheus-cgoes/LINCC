@@ -45,22 +45,47 @@ Chame `lincc.orientacao()` para o guia completo de tolerância e limitações co
 """
 
 from ._base import SB, num, zfin, zn3
-from . import curvas, dados_externos, sm211
+from . import curvas, dados_externos, sm211, fluxo
 from .curvas import tempo, tms_para_tempo, CURVAS
-from .model import AnaModel
-from .solver import (Solver, branches_at, recomposicao_87b,
-                     envelope_contribuicoes, tabela_envelope)
+from .parser_anafas import AnaModel                    # base de curto-circuito (.ANA)
+from .parser_anarede import PwfModel, conciliar_bases  # base de fluxo de potência (.PWF)
+from .solver import Solver, branches_at                # motor de curto-circuito
+from .protecao import (recomposicao_87b,               # motor de proteção
+                       envelope_contribuicoes, tabela_envelope)
 
-__version__ = "0.2.0"
-__all__ = ["AnaModel", "Solver", "branches_at", "recomposicao_87b",
-           "curvas", "tempo", "tms_para_tempo", "CURVAS", "dados_externos", "sm211",
-           "envelope_contribuicoes", "tabela_envelope",
-           "orientacao", "SB", "num", "zfin", "zn3"]
+__version__ = "0.3.0"
+__all__ = [
+    # parsers
+    "AnaModel", "PwfModel", "conciliar_bases",
+    # motor de curto-circuito
+    "Solver", "branches_at",
+    # motor de proteção
+    "recomposicao_87b", "envelope_contribuicoes", "tabela_envelope",
+    # motor de fluxo de potência
+    "fluxo",
+    # apoio
+    "curvas", "tempo", "tms_para_tempo", "CURVAS", "dados_externos", "sm211",
+    "orientacao", "SB", "num", "zfin", "zn3",
+]
 
 _ORIENTACAO = """
 ═══════════════════════════════════════════════════════════════════════════════════════
 LINCC — guia de modos, tolerância e limitações conhecidas
 ═══════════════════════════════════════════════════════════════════════════════════════
+
+0. ORGANIZAÇÃO
+
+   Dois parsers e três motores, em arquivos separados:
+
+       parser_anafas   base de curto-circuito (.ANA)    -> AnaModel
+       parser_anarede  base de fluxo de potência (.PWF) -> PwfModel
+       solver          motor de CURTO-CIRCUITO
+       protecao        motor de PROTEÇÃO
+       fluxo           motor de FLUXO DE POTÊNCIA
+
+   A dependência corre numa direção só: proteção usa o solver, o solver não conhece
+   proteção. O cálculo de curto é validado barra a barra contra o ANAFAS e não muda
+   porque um critério de proteção mudou. Detalhes em docs/arquitetura.md.
 
 1. OS DOIS MODOS
 

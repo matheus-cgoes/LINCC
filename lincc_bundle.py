@@ -300,6 +300,213 @@ class AnaModel:
                 self.deol.setdefault(nb, []).append(reg)
 
 
+# ===================== parser do .PWF (ANAREDE) =====================
+
+def _num(txt, escala=1.0):
+    """Campo numérico do .PWF. Vazio devolve None; escala aplica divisor quando preciso."""
+    s = (txt or '').strip()
+    if not s:
+        return None
+    try:
+        return float(s) / escala
+    except ValueError:
+        return None
+
+
+class PwfModel:
+    """Caso de fluxo de potência do ANAREDE.
+
+    Atributos:
+        barras    {num: dict(nome, V, A, Pg, Qg, Pl, Ql, Sh, area, tipo, estado)}
+        bus_kv    {num: tensão base em kV}  — do bloco DGBT, via grupo de tensão
+        circuitos lista de dict(bf, bt, nc, R, X, Mvar, Tap, Cn, Ce, Cq, estado)
+        geradores {num: dict(Pmn, Pmx, Sno, estado)}
+        titulo    linha do bloco TITU
+    """
+
+    # Réguas derivadas dos cabeçalhos dos próprios blocos (0-based, fim exclusivo).
+    # DBAR: (Num)OETGb(   nome   )Gl( V)( A)( Pg)( Qg)( Qn)( Qm)(Bc  )( Pl)( Ql)( Sh)Are(Vf)M
+    R_DBAR = dict(num=(0, 5), estado=(5, 6), tipo=(6, 7), grupo_base=(8, 9),
+                  nome=(10, 22), V=(24, 28), A=(28, 32), Pg=(32, 37), Qg=(37, 42),
+                  Qn=(42, 47), Qm=(47, 52), Bc=(52, 58), Pl=(58, 63), Ql=(63, 68),
+                  Sh=(68, 73), area=(73, 76), Vf=(76, 80))
+    # DLIN: (De )d O d(Pa )NcEPM( R% )( X% )(Mvar)(Tap)(Tmn)(Tmx)(Phs)(Bc  )(Cn)(Ce)Ns(Cq)
+    R_DLIN = dict(bf=(0, 5), estado=(7, 8), bt=(10, 15), nc=(15, 17), R=(20, 26),
+                  X=(26, 32), Mvar=(32, 38), Tap=(38, 43), Tmn=(43, 48), Tmx=(48, 53),
+                  Phs=(53, 58), Bc=(58, 64), Cn=(64, 68), Ce=(68, 72), Cq=(74, 78))
+    # DGER: (No ) O (Pmn ) (Pmx ) ( Fp) (FpR) (FPn) (Fa) (Fr) (Ag) ( Xq) (Sno) (Est)
+    R_DGER = dict(num=(0, 5), estado=(6, 7), Pmn=(8, 14), Pmx=(15, 21), Fp=(22, 27),
+                  Xq=(55, 60), Sno=(61, 66))
+
+    def __init__(self, path):
+        self.path = path
+        self.titulo = ''
+        self.barras = {}
+        self.bus_kv = {}
+        self.circuitos = []
+        self.geradores = {}
+        self._idx_cir = {}
+        raw = open(path, 'rb').read().decode('cp1252', errors='replace')
+        self._parse(raw.splitlines())
+
+    # ------------------------------------------------------------------ #
+    def _blocos(self, L):
+        """Localiza os blocos: nome na linha, cabeçalho na seguinte, fim em 99999."""
+        import re
+        out = {}
+        for i, ln in enumerate(L):
+            s = ln.strip()
+            if re.fullmatch(r'[A-Z]{4}( [A-Z]{4})?', s):
+                out.setdefault(s.split()[0], []).append(i)
+        return out
+
+    def _registros(self, L, ini):
+        """Linhas de dados de um bloco: da linha após o cabeçalho até o 99999."""
+        for ln in L[ini + 2:]:
+            if ln.strip() == '99999':
+                return
+            if not ln.strip() or ln.startswith('('):
+                continue
+            yield ln
+
+    @staticmethod
+    def _campo(ln, faixa):
+        a, b = faixa
+        return ln[a:b] if len(ln) > a else ''
+
+    def _parse(self, L):
+        bl = self._blocos(L)
+        if 'TITU' in bl and bl['TITU'][0] + 1 < len(L):
+            self.titulo = L[bl['TITU'][0] + 1].strip()
+
+        # --- DBAR ---
+        for i in bl.get('DBAR', []):
+            for ln in self._registros(L, i):
+                try:
+                    nb = int(self._campo(ln, self.R_DBAR['num']))
+                except ValueError:
+                    continue
+                d = {}
+                for k, faixa in self.R_DBAR.items():
+                    if k in ('num', 'nome', 'estado', 'tipo', 'grupo_base'):
+                        continue
+                    d[k] = _num(self._campo(ln, faixa))
+                # V vem em pu x 1000 no arquivo
+                if d.get('V') is not None:
+                    d['V'] = d['V'] / 1000.0
+                d['nome'] = self._campo(ln, self.R_DBAR['nome']).strip()
+                d['estado'] = self._campo(ln, self.R_DBAR['estado']).strip() or 'L'
+                d['tipo'] = self._campo(ln, self.R_DBAR['tipo']).strip()
+                d['grupo_base'] = self._campo(ln, self.R_DBAR['grupo_base']).strip()
+                self.barras[nb] = d
+
+        # --- DGBT: tensão base por grupo ---
+        grupos = {}
+        for i in bl.get('DGBT', []):
+            for ln in self._registros(L, i):
+                g = ln[0:2].strip()
+                v = _num(ln[2:8])
+                if g and v:
+                    grupos[g] = v
+        for nb, d in self.barras.items():
+            kv = grupos.get(d.get('grupo_base'))
+            if kv:
+                self.bus_kv[nb] = kv
+
+        # --- DLIN ---
+        for i in bl.get('DLIN', []):
+            for ln in self._registros(L, i):
+                try:
+                    bf = int(self._campo(ln, self.R_DLIN['bf']))
+                    bt = int(self._campo(ln, self.R_DLIN['bt']))
+                except ValueError:
+                    continue
+                d = dict(bf=bf, bt=bt,
+                         nc=self._campo(ln, self.R_DLIN['nc']).strip() or '1',
+                         estado=self._campo(ln, self.R_DLIN['estado']).strip() or 'L')
+                for k in ('R', 'X', 'Mvar', 'Tap', 'Tmn', 'Tmx', 'Phs', 'Cn', 'Ce', 'Cq'):
+                    d[k] = _num(self._campo(ln, self.R_DLIN[k]))
+                self.circuitos.append(d)
+                self._idx_cir[(bf, bt, d['nc'])] = d
+
+        # --- DGER ---
+        for i in bl.get('DGER', []):
+            for ln in self._registros(L, i):
+                try:
+                    nb = int(self._campo(ln, self.R_DGER['num']))
+                except ValueError:
+                    continue
+                self.geradores[nb] = {k: _num(self._campo(ln, self.R_DGER[k]))
+                                      for k in ('Pmn', 'Pmx', 'Fp', 'Xq', 'Sno')}
+                self.geradores[nb]['estado'] = \
+                    self._campo(ln, self.R_DGER['estado']).strip() or 'L'
+
+    # ------------------------------------------------------------------ #
+    def circuito(self, bf, bt, nc=None):
+        """Circuito pelos terminais. Sem `nc`, devolve o primeiro; aceita ordem invertida."""
+        if nc is not None:
+            return (self._idx_cir.get((bf, bt, str(nc)))
+                    or self._idx_cir.get((bt, bf, str(nc))))
+        for d in self.circuitos:
+            if (d['bf'], d['bt']) in ((bf, bt), (bt, bf)):
+                return d
+        return None
+
+    def despachadas(self, limiar=0.0):
+        """Barras com geração ativa acima do limiar, em MW.
+
+        É o que distingue os cenários para efeito de curto-circuito: nos casos de
+        referência o eixo dominante é diurno contra noturno (~2.200 barras de diferença,
+        efeito solar), e não máxima contra mínima carga (~30).
+        """
+        return {nb: d['Pg'] for nb, d in self.barras.items()
+                if d.get('Pg') is not None and abs(d['Pg']) > limiar}
+
+    def carga_total(self):
+        """Carga ativa e reativa somadas, em MW e Mvar."""
+        p = sum(d['Pl'] for d in self.barras.values() if d.get('Pl'))
+        q = sum(d['Ql'] for d in self.barras.values() if d.get('Ql'))
+        return p, q
+
+    def __repr__(self):
+        return (f"PwfModel({self.titulo[:40]!r}: {len(self.barras)} barras, "
+                f"{len(self.circuitos)} circuitos, {len(self.despachadas())} despachadas)")
+
+
+def conciliar_bases(ana, pwf):
+    """Casa as barras das duas bases e relata as diferenças.
+
+    Casamento por NÚMERO, com verificação por NOME — a grafia varia entre as bases sem que
+    o elemento seja outro. Nos casos de referência, 85,9% das barras do .PWF têm o mesmo
+    número no .ANA, e 97,6% dos nomes coincidem na amostra conferida.
+
+    As exclusivas têm padrão e não são erro: o .ANA detalha nós-estrela fictícios (kV = 0)
+    e terminais de gerador em 13,8 kV que o fluxo agrega, e o .PWF traz barras de usina que
+    o .ANA representa como registro de gerador, não como barra.
+
+    Nunca case em silêncio: se um bay receber carregamento da barra errada, o pickup sai
+    errado sem nada acusar. Chame isto antes de usar as duas bases juntas e registre o
+    resultado no estudo.
+    """
+    a, p = set(ana.bus_kv), set(pwf.barras)
+    comuns = a & p
+    divergentes = []
+    for b in comuns:
+        na = (ana.bus_name.get(b) or '').strip()
+        np_ = (pwf.barras[b].get('nome') or '').strip()
+        if na[:8] != np_[:8] and na.replace('-', '')[:8] != np_.replace('-', '')[:8]:
+            divergentes.append((b, na, np_))
+    so_ana = sorted(a - p)
+    return {
+        'n_ana': len(a), 'n_pwf': len(p), 'comuns': len(comuns),
+        'pct_pwf_casado': 100.0 * len(comuns) / len(p) if p else 0.0,
+        'so_ana': so_ana, 'so_pwf': sorted(p - a),
+        'so_ana_no_estrela': sum(1 for b in so_ana if ana.bus_kv.get(b) == 0),
+        'nomes_divergentes': sorted(divergentes)[:50],
+        'n_nomes_divergentes': len(divergentes),
+    }
+
+
 # ===================== Ybus, LU e faltas =====================
 
 class Solver:
@@ -1686,6 +1893,38 @@ class Solver:
         return -nun * vb / (z0 + zn)
 
 
+def branches_at(model, bus, tipos=('L','T')):
+    """Ramos incidentes na barra (lista de (bf,bt,nc)) — util para montar contingencias."""
+    return [(br['bf'],br['bt'],br['nc']) for br in model.branches
+            if bus in (br['bf'],br['bt']) and br['tipo'] in tipos]
+
+
+# ===================== motor de protecao =====================
+
+def recomposicao_87b(model, bus, kinds=('3F','1FT')):
+    """ICC_MIN de recomposicao para 87B: falta na barra energizada por UM elemento de cada vez.
+    Para cada ramo (L ou perna 138 de banco de trafo) incidente na barra, isola a barra a esse
+    unico elemento (dropa todos os demais incidentes) e calcula a falta. Retorna
+    (tabela: [(rotulo,(bf,bt,nc),{kind:I_kA})], icc_min:{kind:I_kA}). Elementos que nao
+    energizam a barra (Icc~0) aparecem na tabela e devem ser excluidos do ICC_MIN pelo analista."""
+    inc=branches_at(model, bus)
+    tab=[]; mins={k:float('inf') for k in kinds}
+    for keep in inc:
+        drop=[b for b in inc if b!=keep]
+        S=Solver(model, drop_branches=drop); S.factor()
+        vals={}
+        for k in kinds:
+            I=S.fault(bus, kind=k)
+            vals[k]=I
+            if I is not None and I>1e-3: mins[k]=min(mins[k], I)
+        br=next(b for b in model.branches if (b['bf'],b['bt'],b['nc'])==keep)
+        o=br['bt'] if br['bf']==bus else br['bf']
+        rot=f"{br['tipo']} p/ {model.bus_name.get(o,'')[:12]}"
+        tab.append((rot, keep, vals))
+    return tab, mins
+
+
+
 def envelope_contribuicoes(model, barra, tipos=('3F', '1FT', '2F', '2FT'),
                            vizinhanca=1, p_close_in=0.005, solver=None):
     """Envelope de correntes por bay, para ajuste de proteção de barra.
@@ -1817,33 +2056,330 @@ def tabela_envelope(env, model=None, largura=46):
     return '\n'.join(linhas)
 
 
-def branches_at(model, bus, tipos=('L','T')):
-    """Ramos incidentes na barra (lista de (bf,bt,nc)) — util para montar contingencias."""
-    return [(br['bf'],br['bt'],br['nc']) for br in model.branches
-            if bus in (br['bf'],br['bt']) and br['tipo'] in tipos]
+# ===================== motor de fluxo de potencia =====================
+
+def corrente_nominal(mva, kv):
+    """Corrente correspondente a uma potência aparente, em A. I = MVA·1000/(√3·kV)."""
+    if not mva or not kv:
+        return None
+    return float(mva) * 1000.0 / (np.sqrt(3) * float(kv))
 
 
-def recomposicao_87b(model, bus, kinds=('3F','1FT')):
-    """ICC_MIN de recomposicao para 87B: falta na barra energizada por UM elemento de cada vez.
-    Para cada ramo (L ou perna 138 de banco de trafo) incidente na barra, isola a barra a esse
-    unico elemento (dropa todos os demais incidentes) e calcula a falta. Retorna
-    (tabela: [(rotulo,(bf,bt,nc),{kind:I_kA})], icc_min:{kind:I_kA}). Elementos que nao
-    energizam a barra (Icc~0) aparecem na tabela e devem ser excluidos do ICC_MIN pelo analista."""
-    inc=branches_at(model, bus)
-    tab=[]; mins={k:float('inf') for k in kinds}
-    for keep in inc:
-        drop=[b for b in inc if b!=keep]
-        S=Solver(model, drop_branches=drop); S.factor()
-        vals={}
-        for k in kinds:
-            I=S.fault(bus, kind=k)
-            vals[k]=I
-            if I is not None and I>1e-3: mins[k]=min(mins[k], I)
-        br=next(b for b in model.branches if (b['bf'],b['bt'],b['nc'])==keep)
-        o=br['bt'] if br['bf']==bus else br['bf']
-        rot=f"{br['tipo']} p/ {model.bus_name.get(o,'')[:12]}"
-        tab.append((rot, keep, vals))
-    return tab, mins
+def carregamento(pwf, bf, bt, nc=None):
+    """Carregamento de um circuito no cenário lido, em A, e suas capacidades.
+
+    Devolve dict com a corrente de operação e os três limites do DLIN — normal,
+    emergência e equipamento. É o dado que o .ANA não tem e que o critério do 51 de
+    linha, do SOTF e do pickup do 87B exigem.
+    """
+    br = pwf.circuito(bf, bt, nc)
+    if br is None:
+        return None
+    kv = pwf.bus_kv.get(bf) or pwf.bus_kv.get(bt)
+    out = {
+        'cap_normal_A': br.get('Cn'),
+        'cap_emergencia_A': br.get('Ce'),
+        'cap_equipamento_A': br.get('Cq'),
+        'kv': kv,
+    }
+    p, q = br.get('P'), br.get('Q')
+    if p is not None and q is not None and kv:
+        out['corrente_A'] = corrente_nominal((p * p + q * q) ** 0.5, kv)
+    return out
+
+
+def tensao_barra(pwf, bus):
+    """Tensão e ângulo da barra no cenário lido: (V em pu, ângulo em grau)."""
+    b = pwf.barras.get(bus)
+    if b is None:
+        return None
+    return b.get('V'), b.get('A')
+
+
+def envelope_cenarios(cenarios, funcao):
+    """Aplica `funcao(pwf)` a cada cenário e devolve mínimo e máximo, COM o cenário.
+
+    `cenarios` é {nome: PwfModel}. O mínimo de curto dimensiona sensibilidade e o máximo
+    dimensiona suportabilidade, e eles costumam cair em cenários DIFERENTES — por isso o
+    retorno nomeia de onde veio cada extremo, em vez de devolver só os números.
+
+    Nos casos de referência a variação dominante é diurno contra noturno (~2.200 barras
+    despachadas de diferença, efeito solar), e não máxima contra mínima carga (~30).
+    Varrer só níveis de carga perderia quase toda a variação.
+    """
+    vals = []
+    for nome, pwf in (cenarios or {}).items():
+        try:
+            v = funcao(pwf)
+        except Exception:
+            continue
+        if v is not None:
+            vals.append((float(v), nome))
+    if not vals:
+        return None
+    return {'min': min(vals), 'max': max(vals), 'n': len(vals)}
+
+
+# ===================== curvas de tempo inverso =====================
+
+# (A, B, C) da forma t = TMS·[A/((I/Is)^B − 1) + C]
+CURVAS = {
+    'IEC': {
+        'NI':  (0.14,  0.02, 0.0),      # normalmente inversa
+        'MI':  (13.5,  1.0,  0.0),      # muito inversa   <- padrão dos estudos SGBH
+        'EI':  (80.0,  2.0,  0.0),      # extremamente inversa
+        'LTI': (120.0, 1.0,  0.0),      # tempo longo inversa
+    },
+    'IEEE': {
+        'MODINV': (0.0515, 0.02, 0.114),   # moderadamente inversa
+        'MI':     (19.61,  2.0,  0.491),   # muito inversa
+        'EI':     (28.2,   2.0,  0.1217),  # extremamente inversa
+    },
+}
+
+NORMA_PADRAO = 'IEC'
+CURVA_PADRAO = 'MI'
+
+_NOMES = {
+    'NI': 'normalmente inversa', 'MI': 'muito inversa',
+    'EI': 'extremamente inversa', 'LTI': 'tempo longo inversa',
+    'MODINV': 'moderadamente inversa',
+}
+
+
+def constantes(curva=CURVA_PADRAO, norma=NORMA_PADRAO):
+    """Devolve (A, B, C) da curva. Levanta ValueError com as opções válidas."""
+    n = (norma or NORMA_PADRAO).upper()
+    if n not in CURVAS:
+        raise ValueError(f"norma deve ser uma de {sorted(CURVAS)}, recebido {norma!r}")
+    c = (curva or CURVA_PADRAO).upper()
+    if c not in CURVAS[n]:
+        raise ValueError(f"curva {curva!r} não existe em {n}; disponíveis: "
+                         f"{sorted(CURVAS[n])}")
+    return CURVAS[n][c]
+
+
+def tempo(I, Is, tms=1.0, curva=CURVA_PADRAO, norma=NORMA_PADRAO):
+    """Tempo de operação, em segundos, para corrente `I` e pickup `Is` (mesma unidade).
+
+    Devolve `inf` quando I ≤ Is: abaixo do pickup a unidade não opera. Aceita escalar ou
+    array de correntes.
+    """
+    A, B, C = constantes(curva, norma)
+    k = 1.0 / 7.0 if (norma or NORMA_PADRAO).upper() == 'IEEE' else 1.0
+    m = np.asarray(I, dtype=float) / float(Is)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        t = k * tms * (A / (m ** B - 1.0) + C)
+        t = np.where(m > 1.0, t, np.inf)
+    return float(t) if np.ndim(t) == 0 else t
+
+
+def tms_para_tempo(I, Is, t_alvo, curva=CURVA_PADRAO, norma=NORMA_PADRAO):
+    """TMS que produz `t_alvo` na corrente `I`. É o inverso de `tempo`.
+
+    Usado para ajustar o 51 de linha ao tempo exigido pela coordenação com a zona 2.
+    """
+    A, B, C = constantes(curva, norma)
+    m = float(I) / float(Is)
+    if m <= 1.0:
+        raise ValueError(f"I/Is = {m:.3f} não supera o pickup: a unidade não operaria")
+    k = 1.0 / 7.0 if (norma or NORMA_PADRAO).upper() == 'IEEE' else 1.0
+    base = k * (A / (m ** B - 1.0) + C)
+    if base <= 0:
+        raise ValueError("curva degenerada para esta relação I/Is")
+    return float(t_alvo) / base
+
+
+def descreve(curva=CURVA_PADRAO, norma=NORMA_PADRAO):
+    """Rótulo para relatório, com a norma explícita — ela nunca deve ficar implícita."""
+    A, B, C = constantes(curva, norma)
+    n = (norma or NORMA_PADRAO).upper(); c = (curva or CURVA_PADRAO).upper()
+    return f"{n} {_NOMES.get(c, c)} (A={A}, B={B}, C={C})"
+
+
+# ===================== Submodulo 2.11 =====================
+
+# item 4.x — funções exigidas por componente. (código, descrição, item do submódulo)
+FUNCOES = {
+    'linha': [
+        ('21/21N', 'distância para faltas entre fases e fase-terra, temporizadores independentes por zona', '4.2.1.2(a)'),
+        ('67N/67Q', 'sobrecorrente direcional residual e/ou de sequência negativa, com unidades instantânea e temporizada', '4.2.1.2(b)'),
+        ('LPP',     'lógica de detecção de perda de potencial, para bloqueio e alarme', '4.2.1.2(c)'),
+        ('SOTF',    'detecção de falta durante a energização da LT (switch onto fault)', '4.2.1.2(d)'),
+        ('59',      'sobretensão com elementos instantâneos e temporizados independentes nas três fases', '4.2.1.2(e)'),
+        ('68/78',   'bloqueio por oscilação de potência (68 OSB), disparo (68 OST) e perda de sincronismo (78 OST)', '4.2.1.2(f)'),
+        ('79/25',   'dois esquemas de religamento automático e verificação de sincronismo, redundantes', '4.2.2.1'),
+    ],
+    'transformador': [
+        ('87',      'diferencial percentual por fase, com restrição ou bloqueio para inrush e sobreexcitação', '4.4.1(a)(1)'),
+        ('50/51',   'sobrecorrente instantânea e temporizada de fase, vinculada a CADA enrolamento', '4.4.1(a)(2)'),
+        ('50/51R',  'sobrecorrente instantânea e temporizada residual, vinculada a CADA enrolamento', '4.4.1(a)(2)'),
+        ('50/51N',  'sobrecorrente de neutro, vinculada a CADA ponto de aterramento', '4.4.1(a)(3)'),
+        ('59G',     'sobretensão de sequência zero no terciário em delta, para alarme de falta à terra', '4.4.1(a)(4)'),
+        ('87N',     'diferencial de terra restrita, vinculada a CADA ponto de aterramento', '4.4.1(a)(5)'),
+        ('63/20',   'detecção de gás ou aumento de pressão interna, inclusive do comutador', '4.4.1(b)(1)'),
+        ('26/49',   'sobretemperatura de óleo e de enrolamento, dois níveis cada', '4.4.1(b)(2,3)'),
+    ],
+    'reator': [
+        ('87',      'diferencial por fase, com bloqueio ou restrição para inrush e sobreexcitação', '4.5.1(a)(1)'),
+        ('87R',     'diferencial de terra restrita', '4.5.1(a)(2)'),
+        ('50/51',   'sobrecorrente instantânea e temporizada de fase, do lado da LT ou da barra onde o reator está conectado', '4.5.1(a)(3)'),
+        ('50/51R',  'sobrecorrente instantânea e temporizada residual, do mesmo lado', '4.5.1(a)(3)'),
+        ('50/51R-N','sobrecorrente residual do lado do neutro, ou 50/51N', '4.5.1(a)(4)'),
+        ('63/20',   'detecção de gás ou pressão interna', '4.5.1(b)(1)'),
+        ('26/49',   'sobretemperatura de óleo e de enrolamento, dois níveis cada', '4.5.1(b)(2,3)'),
+    ],
+    'barra': [
+        ('87B',     'princípio diferencial ou comparação de fase, por fase; exceto arranjo em anel', '4.6.1'),
+    ],
+    'disjuntor': [
+        ('50BF',    'detecção de corrente do esquema de falha de disjuntor', '4.7.3(a)'),
+        ('62BF',    'temporização do esquema de falha de disjuntor', '4.7.3(b)'),
+    ],
+}
+
+# item 4.1.2 e 4.7.2 — tempos máximos, em ms
+TEMPOS = {
+    'eliminacao_acima_230kV': (70, '4.1.2(a)', 'tempo total de eliminação, defeito sólido sem falha de disjuntor'),
+    'eliminacao_230kV':       (90, '4.1.2(b)', 'idem, em 230 kV'),
+    'falha_disjuntor':        (250, '4.7.2', 'tempo total pelo esquema de falha de disjuntor, incluindo relés auxiliares e abertura'),
+}
+
+
+def tempo_maximo(kv, falha_disjuntor=False):
+    """Tempo máximo de eliminação em ms, conforme o item 4.1.2 (ou 4.7.2)."""
+    if falha_disjuntor:
+        return TEMPOS['falha_disjuntor'][0]
+    return TEMPOS['eliminacao_230kV'][0] if kv <= 230 else TEMPOS['eliminacao_acima_230kV'][0]
+
+
+def funcoes_exigidas(tipo):
+    """Funções que o Submódulo 2.11 exige para o componente."""
+    if tipo not in FUNCOES:
+        raise ValueError(f"tipo deve ser um de {sorted(FUNCOES)}, recebido {tipo!r}")
+    return list(FUNCOES[tipo])
+
+
+def exige_stub(arranjo):
+    """Stub Bus Protection é exigida em disjuntor e meio, barra dupla com disjuntor duplo
+    e anel — item 4.1.6, para falta no trecho que permanece energizado com a seccionadora
+    da função de transmissão aberta e os disjuntores fechados."""
+    a = (arranjo or '').lower()
+    return any(k in a for k in ('disjuntor e meio', 'disjuntor duplo', 'anel'))
+
+
+def verificar_escopo(tipo, previstas):
+    """Compara as funções previstas no estudo com as exigidas. Devolve as que faltam.
+
+    Verificação documental, não de ajuste: diz o que o Submódulo 2.11 exige e o estudo
+    não contempla.
+    """
+    tem = {p.upper().replace(' ', '') for p in (previstas or [])}
+    falta = []
+    for cod, desc, item in funcoes_exigidas(tipo):
+        alternativas = {c.upper().replace(' ', '') for c in cod.replace('/', ' ').split()}
+        alternativas.add(cod.upper().replace(' ', ''))
+        if not (alternativas & tem):
+            falta.append((cod, desc, item))
+    return falta
+
+
+# ===================== dados externos =====================
+
+# chave -> (rótulo, unidade, o que bloqueia se faltar)
+CATALOGO = {
+    'carga_max_lt':     ('Carga máxima da LT', 'A ou MVA',
+                         'pickup do 51 de linha (120% da carga máxima). O .ANA traz a '
+                         'potência NOMINAL no campo MVA, que não é a carga máxima '
+                         'operativa — confirme se serve ao critério'),
+    'in_lt':            ('Corrente nominal da LT', 'A',
+                         'limite inferior do SOTF'),
+    'rtc':              ('Relação do TC do vão', '-',
+                         'conversão para secundário e limite inferior do 67NT'),
+    'in_tc':            ('Corrente nominal primária do TC', 'A',
+                         'pickup do 67NT (10% de In do TC)'),
+    'mva_trafo':        ('Potência nominal do transformador (placa)', 'MVA',
+                         'pickup do 51 do trafo (150% da nominal) e estimativa de inrush'),
+    'inrush':           ('Corrente de inrush', 'A ou múltiplo de In',
+                         'limite inferior do 50 do trafo'),
+    'mva_reator':       ('Potência nominal do reator', 'Mvar',
+                         'corrente nominal de referência do reator'),
+    'icc_disj':         ('Capacidade de interrupção do disjuntor', 'kA',
+                         'verificação de suportabilidade'),
+    'ajustes_vizinhos': ('Ajustes dos IEDs adjacentes', '-',
+                         'verificação de coordenação com os elementos vizinhos'),
+    'zf_sotf':          ('Impedância de falta para o critério do SOTF', 'ohm ou pu',
+                         'limite superior do SOTF (80% do Icc mínimo remoto)'),
+}
+
+# o que cada tipo de estudo exige
+EXIGIDOS = {
+    'linha':          ('carga_max_lt', 'in_lt', 'rtc', 'in_tc', 'zf_sotf',
+                       'icc_disj', 'ajustes_vizinhos'),
+    'transformador':  ('mva_trafo', 'inrush', 'rtc', 'in_tc', 'icc_disj',
+                       'ajustes_vizinhos'),
+    'reator':         ('mva_reator', 'rtc', 'in_tc', 'icc_disj'),
+    'barra':          ('rtc', 'in_tc', 'icc_disj'),
+}
+
+
+def da_base(model, bf, bt, nc):
+    """Extrai da base o que ela puder fornecer para o elemento (bf,bt,nc).
+
+    O .ANA traz a potência nominal no campo MVA do DCIR — a única grandeza de capacidade
+    do arquivo. Onde estiver preenchida, dispensa o usuário de informar a nominal, e a
+    corrente nominal sai dela: In = MVA·1000 / (√3 · kV).
+
+    Não há carregamento MÁXIMO no arquivo: o campo é potência nominal, e o critério do 51
+    de linha pede a carga máxima operativa, que costuma diferir. Quando só o MVA existe,
+    o valor é devolvido com a chave `mva_nominal` e cabe a quem usa decidir se serve.
+    """
+    achado = {}
+    for br in model.branches:
+        if (br['bf'], br['bt'], str(br['nc'])) != (bf, bt, str(nc)):
+            continue
+        mva = br.get('MVA')
+        if mva:
+            kv = model.bus_kv.get(br['bf'], 0) or model.bus_kv.get(br['bt'], 0)
+            achado['mva_nominal'] = mva
+            if kv:
+                achado['in_nominal'] = mva * 1000.0 / (3 ** 0.5 * kv)
+            if br['tipo'] == 'L':
+                achado['in_lt'] = achado.get('in_nominal')
+            else:
+                achado['mva_trafo'] = mva
+        break
+    return achado
+
+
+def faltantes(tipo, fornecidos=None, model=None, elemento=None):
+    """Lista o que falta para parametrizar `tipo`.
+
+    `fornecidos` é o dict do usuário. Se `model` e `elemento=(bf,bt,nc)` forem dados, o
+    que a base puder fornecer é considerado presente — não se pede ao usuário um dado que
+    o arquivo já traz.
+    """
+    if tipo not in EXIGIDOS:
+        raise ValueError(f"tipo deve ser um de {sorted(EXIGIDOS)}, recebido {tipo!r}")
+    tem = dict(fornecidos or {})
+    if model is not None and elemento is not None:
+        for k, v in da_base(model, *elemento).items():
+            tem.setdefault(k, v)
+    return [k for k in EXIGIDOS[tipo] if tem.get(k) in (None, '')]
+
+
+def RELATORIO(chaves, tipo=None):
+    """Texto pedindo os dados que faltam, com o que cada um bloqueia."""
+    if not chaves:
+        return "Todos os dados externos necessários foram fornecidos."
+    cab = (f"Faltam {len(chaves)} dado(s) para parametrizar"
+           + (f" {tipo}" if tipo else "") + ". O .ANA não os contém:\n")
+    linhas = []
+    for k in chaves:
+        rot, uni, bloq = CATALOGO[k]
+        linhas.append(f"  {rot} [{uni}]\n      necessário para: {bloq}")
+    return cab + "\n".join(linhas) + (
+        "\n\nO cálculo de curto-circuito não depende destes dados e segue normalmente.")
 
 
 __all__ = ["AnaModel", "Solver", "branches_at", "recomposicao_87b", "SB", "num", "zfin", "zn3"]

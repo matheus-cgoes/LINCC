@@ -1,7 +1,8 @@
 # Uso do LINCC
 
-Operação do motor, escolha de modo, tolerância de validação, limitações conhecidas e API.
-Para instalação e exemplos rápidos, veja o [README](../README.md).
+Operação dos motores, escolha de modo, tolerância de validação, limitações conhecidas e API.
+Para instalação e exemplos rápidos, veja o [README](../README.md); para a organização dos
+módulos, [`arquitetura.md`](arquitetura.md).
 
 ---
 
@@ -129,6 +130,7 @@ erro de cálculo de arredondamento de relatório.
 | `S.fault(bus, kind)` | Corrente de falta em kA primários. `kind`: `'3F'`, `'1FT'`, `'2F'`, `'2FT'` |
 | `S.zth(bus)` | `(Z1, Z2, Z0)` em pu, base 100 MVA |
 | `S.fault_fc(bus, kind)` | Corrente com conversores, direto (o que o modo completo chama) |
+| `S.fault(bus, kind, Zf=...)` | Falta através de impedância, em pu. Suportada nos **dois** modos |
 
 ### Contingência
 
@@ -150,13 +152,85 @@ por nó-estrela fictício: para removê-lo, remova **todas** as pernas.
 | `bus_voltage(fbus, obus, kind)` | Tensões no relé → impedância aparente de distância. Mútuas e capacitor série já estão na Ybus |
 | `line_end_open(bf, bt, nc, fechado, kind)` | Corrente no terminal fechado com o remoto aberto |
 | `fault_on_branch(bf, bt, nc, p, kind)` | Falta intermediária a fração `p` de um ramo série |
+| `line_end_open(bf, bt, nc, fechado, kind, p)` | Terminal remoto aberto, em qualquer posição: `p=0` close-in, `p=1` ponta |
 | `fault_on_shunt(bus, p, kind)` | Falta intermediária em reator shunt |
 | `winding_ground_fault(bus, Zw, n)` | Curva de triagem de falta à terra em enrolamento (87REF) |
 | `recomposicao_87b(M, bus)` | Corrente mínima com a barra energizada por um só elemento |
+| `envelope_contribuicoes(M, bus)` | O estudo de barra completo numa chamada — ver abaixo |
+| `varredura_line_end_open(bf, bt, nc, fechado)` | Série de correntes com o terminal remoto aberto, varrendo a posição |
+| `corrente_seq0_ramo(V0, br, bus)` | 3I0 em bay de transformador, que `branch_current` não cobre |
 
 Sem relação de TC, todas as correntes são **primárias**. Ao dispor dos TCs, refira ao
 secundário pela relação e adote como corrente de base do estudo a nominal primária do TC —
 não a nominal do equipamento protegido.
+
+---
+
+## O estudo de barra numa chamada
+
+```python
+from lincc import envelope_contribuicoes, tabela_envelope
+print(tabela_envelope(envelope_contribuicoes(M, BARRA, solver=S)))
+```
+
+Executa implicitamente o conjunto que um estudo de barra pede: os quatro tipos de defeito,
+sistema completo e N-1 até uma barra vizinha, contingência por retirada **e** por terminal
+oposto aberto, defeito na barra e close-in em cada equipamento. Devolve, por bay, a maior e
+a menor corrente do loop fase-fase e do loop de terra (3I0), **com o cenário de cada
+extremo**. Só a barra do estudo precisa ser informada.
+
+## Curvas de tempo inverso
+
+```python
+from lincc import tempo, tms_para_tempo
+tempo(I=2000, Is=400, tms=0.2)                 # IEC muito inversa (padrão)
+tempo(I=2000, Is=400, tms=5.0, norma='IEEE')   # IEEE C37.112
+tms_para_tempo(I=2000, Is=400, t_alvo=0.4)     # inverso: ajusta ao tempo exigido
+```
+
+IEC 60255-151 é o padrão (`NI`, `MI`, `EI`, `LTI`); IEEE C37.112 disponível (`MODINV`,
+`MI`, `EI`).
+
+**A IEEE traz o fator 1/7 da norma**, e parte dos fabricantes implementa sem ele — o que
+multiplica o tempo por sete. Em I/Is = 5 na muito inversa, a IEC dá 3,375·TMS e a IEEE
+0,187·TD: comparar TMS com TD sem converter é erro comum.
+
+## Escopo de proteção — Submódulo 2.11
+
+```python
+from lincc.sm211 import funcoes_exigidas, tempo_maximo, verificar_escopo, exige_stub
+funcoes_exigidas('reator')                  # o que o 2.11 exige, com o item de cada
+tempo_maximo(500)                           # 70 ms acima de 230 kV; 90 ms em 230 kV
+verificar_escopo('reator', ['87', '50/51']) # o que o estudo não contempla
+```
+
+O Submódulo 2.11 define **quais** funções devem existir e os tempos máximos; **não** define
+critérios de ajuste. Esses vêm das filosofias do ONS citadas nas suas referências e da
+especificação do agente.
+
+## Dados que as bases não trazem
+
+```python
+from lincc.dados_externos import faltantes, da_base, RELATORIO
+print(RELATORIO(faltantes('linha', fornecidos, model=M, elemento=(bf, bt, nc)), 'linha'))
+```
+
+Cobrado **apenas** na parametrização — cálculo de curto-circuito não depende disso. O `.ANA`
+traz a potência nominal no campo MVA do DCIR; atenção que é nominal, **não** carga máxima
+operativa, que o critério do 51 de linha pede. A carga máxima vem do ANAREDE.
+
+## Capacitância de linha
+
+```python
+S = Solver(M, charging=True)      # carimba S1 e S0 em modelo π
+```
+
+**Desligada por padrão**: o gabarito de impedância de barra do ANAFAS não a inclui, e ligada
+Z₁ cai de 100,000% para 50,4% das barras dentro de 1%, nas duas bases. O cálculo de falta
+com terminal aberto do ANAFAS, esse sim, a inclui — as duas coisas convivem.
+
+Nunca ligue para conciliar contra o relatório de impedâncias. E ligá-la **não** corrige o
+desvio do `line_end_open`, porque a função remove a linha e a capacitância sai junto.
 
 ---
 
@@ -170,6 +244,13 @@ não a nominal do equipamento protegido.
 - **Faltas desequilibradas** usam a tensão equivalente do estado convergido. O conversor
   contribui só em sequência positiva (manual do ANAFAS, item 2.8.3), o que o relatório de
   falta monofásica confirma.
+
+### Do `line_end_open`
+
+Erro conhecido contra o ANAFAS no caso de referência: **−4,11% em falta trifásica** e −0,41%
+em monofásica. A função remove a linha para simular o terminal aberto; o ANAFAS mantém o
+trecho pendurado e representa sua capacitância, que reduz a impedância vista. Conservador
+para sensibilidade e **não** conservador para dimensionamento.
 
 ### Gerais
 

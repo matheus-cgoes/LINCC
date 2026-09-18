@@ -1,8 +1,20 @@
 # LINCC — Linguagem Natural em Curto-Circuito
 
-Motor de curto-circuito para sistemas de transmissão, em Python. Lê casos em formato `.ANA`,
-monta as redes de sequência positiva e zero e calcula equivalentes de Thévenin, correntes de
-falta e grandezas de apoio a estudos de proteção por fatoração LU esparsa.
+Ferramenta de cálculo para estudos de transmissão, em Python. Três motores independentes
+sobre dois parsers:
+
+| Módulo | Papel |
+|---|---|
+| `parser_anafas` | lê a base de curto-circuito (`.ANA`) |
+| `parser_anarede` | lê a base de fluxo de potência (`.PWF`) |
+| `solver` | **motor de curto-circuito** — redes de sequência, Thévenin e correntes de falta por LU esparsa |
+| `protecao` | **motor de proteção** — envelopes por bay, recomposição, critérios de ajuste |
+| `fluxo` | **motor de fluxo de potência** — carregamento, capacidades, tensão, despacho por cenário |
+| `curvas`, `sm211`, `dados_externos` | apoio: curvas IEC/IEEE, escopo do Submódulo 2.11, dados externos |
+
+Os motores são separados de propósito, e a dependência corre numa direção só: proteção usa
+o solver, o solver não conhece proteção. O cálculo de curto-circuito é validado barra a
+barra contra o ANAFAS e não deve mudar porque um critério de proteção mudou.
 
 Validado barra a barra contra o ANAFAS, com critério de erro **individual** por barra abaixo
 de 1% — não erro médio.
@@ -58,6 +70,10 @@ O motor avisa sozinho, ao fatorar, quando o caso tem geração por conversor e o
 a respeito. Detalhes de operação, validação de caso novo e escolha de tolerância estão em
 [`docs/uso.md`](docs/uso.md).
 
+**Primeira vez?** [`examples/prompt-demonstracao.md`](examples/prompt-demonstracao.md) traz
+um prompt completo e comentado: impacto da entrada de uma LT, barras com variação acima de
+10%, e o relatório de curto-circuito de uma barra com as correntes que a proteção usa.
+
 ---
 
 ## Exemplos
@@ -67,7 +83,7 @@ a respeito. Detalhes de operação, validação de caso novo e escolha de toler�
 ```python
 from lincc import AnaModel, Solver
 
-M = AnaModel("caso.ANA")
+M = AnaModel("caso.ANA")          # base de curto-circuito
 S = Solver(M); S.factor()
 
 S.fault(BARRA, "3F")      # trifásica, em kA primários
@@ -95,6 +111,17 @@ S_sem.factor()
 delta = (S.fault(BARRA, "3F") - S_sem.fault(BARRA, "3F")) / S_sem.fault(BARRA, "3F")
 ```
 
+### Estudo de barra completo
+
+```python
+from lincc import envelope_contribuicoes, tabela_envelope
+print(tabela_envelope(envelope_contribuicoes(M, BARRA, solver=S)))
+```
+
+Quatro tipos de defeito, sistema completo e N-1, contingência por retirada e por terminal
+oposto aberto, defeito na barra e close-in — devolvendo a maior e a menor corrente de fase e
+de 3I0 por bay, com o cenário de cada extremo.
+
 ### Insumos de proteção
 
 ```python
@@ -104,6 +131,34 @@ S.line_end_open(BF, BT, NC, FECHADO, "3F")       # terminal fechado, remoto aber
 S.fault_on_branch(BF, BT, NC, 0.8, "1FT")        # falta a 80% da linha
 recomposicao_87b(M, BARRA)                       # ICC_MIN por elemento energizante
 ```
+
+### Fluxo de potência e envelope entre cenários
+
+```python
+from lincc import PwfModel, conciliar_bases
+from lincc.fluxo import carregamento, tensao_barra, envelope_cenarios
+
+P = PwfModel("cenario.PWF")
+carregamento(P, BF, BT, NC)       # capacidade normal, de emergência e de equipamento
+tensao_barra(P, BARRA)            # tensão e ângulo em regime
+
+conciliar_bases(M, P)             # casa as duas bases e relata as diferenças
+```
+
+A base de fluxo fornece o que a de curto não tem: carregamento e capacidade por circuito em
+três níveis, tensão e ângulo em regime, e o despacho de cada cenário. Vários critérios
+dependem dela — pickup do 87B acima da corrente de carga, SOTF acima do carregamento
+máximo, load encroachment.
+
+```python
+env = envelope_cenarios({nome: PwfModel(arq) for nome, arq in cenarios.items()},
+                        lambda P: alguma_grandeza(P))
+env['min'], env['max']            # cada extremo vem com o nome do cenário
+```
+
+Nos casos de referência do ONS a variação dominante é **diurno contra noturno** (~2.200
+barras despachadas de diferença, efeito solar), não máxima contra mínima carga (~30).
+Varrer só níveis de carga perde quase toda a variação.
 
 ### Validar um caso novo
 
@@ -132,6 +187,7 @@ Python 3.10+. Dependências: `numpy`, `scipy`.
 | Documento | Conteúdo |
 |---|---|
 | [`docs/uso.md`](docs/uso.md) | Operação, modos, tolerância, limitações e API completa |
+| [`docs/arquitetura.md`](docs/arquitetura.md) | Os três motores, os dois parsers e por que estão separados |
 | [`docs/formato-ana.md`](docs/formato-ana.md) | Réguas de coluna e convenções do formato `.ANA` |
 | [`docs/mutuas.md`](docs/mutuas.md) | Acoplamento mútuo de sequência zero |
 | [`docs/validacao.md`](docs/validacao.md) | Metodologia de validação e histórico de correções |

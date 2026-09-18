@@ -3,6 +3,7 @@
 Nenhum dado proprietário: as redes são pequenas e verificáveis à mão (ver cases/ESPERADO.md).
 """
 import math
+import pathlib
 from pathlib import Path
 
 import pytest
@@ -322,3 +323,33 @@ def test_potencia_nominal_lida_da_base():
     assert d["mva_nominal"] == 200.0
     assert d["in_lt"] == pytest.approx(200_000 / (math.sqrt(3) * 138.0), rel=1e-9)
     assert "in_lt" not in faltantes("linha", {}, model=M, elemento=(1, 2, "1"))
+
+
+# ---------- modularidade ----------
+
+def test_modularidade_preserva_a_api():
+    """A separação em parsers e motores não muda a API pública nem o caminho de import.
+
+    `lincc.model` continua importável por compatibilidade, e tudo o que era exposto
+    continua exposto — a modularização é estrutural, não de interface.
+    """
+    import lincc
+    from lincc.model import AnaModel as Legado          # shim de compatibilidade
+    from lincc.parser_anafas import AnaModel as Novo
+    assert Legado is Novo
+    esperado = {"AnaModel", "PwfModel", "conciliar_bases", "Solver", "branches_at",
+                "recomposicao_87b", "envelope_contribuicoes", "tabela_envelope",
+                "fluxo", "curvas", "sm211", "dados_externos", "orientacao"}
+    assert esperado <= set(lincc.__all__)
+    for nome in esperado:
+        assert hasattr(lincc, nome), f"{nome} deixou de ser exportado"
+
+
+def test_solver_nao_depende_do_motor_de_protecao():
+    """O motor de curto-circuito não importa o de proteção — a dependência é só na direção
+    oposta. É o que garante que um critério de proteção não possa alterar o cálculo de
+    curto, que é validado barra a barra contra o ANAFAS."""
+    fonte = (pathlib.Path(__file__).parent.parent
+             / "src" / "lincc" / "solver.py").read_text(encoding="utf-8")
+    assert "protecao" not in fonte
+    assert "import fluxo" not in fonte and "from .fluxo" not in fonte
