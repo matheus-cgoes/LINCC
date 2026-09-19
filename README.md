@@ -29,12 +29,14 @@ Anexe dois arquivos na conversa com o agente:
 - **`lincc_bundle.py`** — o motor inteiro em um arquivo, sem instalação (está na raiz deste
   repositório)
 - **o seu caso `.ANA`**
+- **os relatórios do ANAFAS do mesmo caso** — necessários para validar o cálculo antes de
+  emitir corrente (ver a seção seguinte)
 
 E descreva o estudo. Não é preciso enumerar tipos de defeito, contingências ou formato de
 saída: o protocolo está embutido no próprio código.
 
 ```
-Anexei o lincc_bundle.py e a base BR2612PJ.ANA.
+Anexei o lincc_bundle.py, a base BR2612PJ.ANA e os relatórios do ANAFAS desse caso.
 
 ESTUDO: entrada em operação da LT 500 kV Curral Novo do Piauí (6640) –
 São João do Piauí 2 (45019), circuito 1.
@@ -47,6 +49,54 @@ operação. Relacione para que serve cada grandeza no ajuste.
 
 O resultado desse pedido, comentado, está em
 [`examples/prompt-demonstracao.md`](examples/prompt-demonstracao.md).
+
+---
+
+## Validação do caso: um passo obrigatório
+
+As bases do ONS trazem centenas de eólicas e fotovoltaicas conectadas por conversor — são
+**400 a 500 registros** em cada horizonte. Perto delas, incluir ou não essa contribuição
+muda a corrente em mais de 40%, e é a corrente **com** as fontes que responde pelo número
+regulatório.
+
+Por isso o motor pede uma conferência antes de devolver esse número, e ela vale para
+**qualquer caso real**:
+
+```python
+S.validar_completo(niveis_kA, limite=1.0)
+```
+
+onde `niveis_kA` é `{barra: corrente_kA}` lido da seção **RELATÓRIO DE NÍVEIS DE
+CURTO-CIRCUITO** do relatório do ANAFAS **do mesmo caso**. Sem essa conferência, o cálculo
+que inclui os conversores não responde — o motor mostra o comando e as alternativas ao
+carregar o caso.
+
+**Por quê.** O motor lê o *formato* `.ANA`, não um caso específico. Um tipo de registro que
+não apareça no caso contra o qual o motor foi validado é ignorado em silêncio: o número
+sai, e pode sair errado sem nenhum aviso. Conferir contra o relatório do próprio caso é o
+que fecha essa lacuna. O modelo de cálculo em si já é validado — o que se confere aqui é a
+**leitura daquele arquivo**.
+
+### Quais relatórios exportar do ANAFAS
+
+| Relatório | Para que |
+|---|---|
+| **Níveis de curto-circuito** | Liberar o cálculo com os conversores. É o único que os inclui |
+| **Impedâncias de barra** | Conferir Z₁ e Z₀ com 10 decimais — o gabarito mais preciso |
+
+### Se o relatório não estiver disponível
+
+Duas saídas, e as duas precisam constar no estudo:
+
+```python
+S.liberar_completo_sem_gabarito()      # assume o risco; o selo registra a ausência
+S.fault(barra, kind, modo='sincronas') # Thévenin puro, sem as fontes de conversor
+```
+
+A primeira devolve o número regulatório sem conferência da leitura do caso —
+`S.selo_completo()['conferido_no_caso']` volta `False`, e é isso que se declara. A segunda
+é conservadora e não depende de nada, mas **não** é o número para dimensionamento perto de
+usina com conversor.
 
 ---
 
@@ -84,9 +134,6 @@ S.fault(BARRA, "3F")                          # corrente de falta, em kA primár
 impacto_entrada(M, [(BF, BT, NC)])            # evolução pela entrada de um equipamento
 relatorio_protecao(M, 'linha', (BF, BT, NC))  # relatório do equipamento
 ```
-
-Um caso com geração por conversor exige liberar o modo antes, conferindo contra o relatório
-do próprio caso — o motor avisa como ao fatorar.
 
 ---
 

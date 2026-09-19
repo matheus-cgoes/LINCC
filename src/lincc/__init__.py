@@ -13,19 +13,35 @@ PROTOCOLO DE TRABALHO — vale para toda chamada, sem precisar ser repetido no p
 1. Este motor é a fonte de verdade. Importe e use; não recrie a modelagem de memória, não
    reescreva o parser, não calcule nada à mão. Todo número de um estudo sai daqui.
 
-2. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
+2. VALIDE O CASO ANTES DE EMITIR CORRENTE. Toda base real do ONS traz 400 a 500 eólicas e
+   fotovoltaicas conectadas por conversor, e o número regulatório é o que as inclui. O
+   motor só o devolve depois de conferir a leitura deste caso:
+
+       S.validar_completo(niveis_kA, limite=1.0)
+
+   `niveis_kA` é {barra: corrente_kA} da seção 'RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO' do
+   relatório do ANAFAS DO MESMO CASO. Se os relatórios não estiverem anexados, PEÇA-OS
+   antes de prosseguir. Só se o usuário não os tiver:
+
+       S.liberar_completo_sem_gabarito()       # e DECLARE que a leitura não foi conferida
+       S.fault(bus, kind, modo='sincronas')    # Thévenin puro, conservador
+
+   Nunca escolha uma dessas saídas em silêncio: o estudo tem de dizer sob qual hipótese
+   os números foram calculados.
+
+3. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
    capacidade de interrupção e carga máxima operativa NÃO estão no .ANA. As funções de
    alto nível devolvem `dados_faltantes` com o que falta e o critério que cada item
    bloqueia — reporte a lista em vez de estimar.
 
-3. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
+4. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
    conectadas por conversor; 'sincronas' é o Thévenin puro. Perto dessas usinas a
    diferença passa de 40%. Não misture os dois num mesmo critério.
 
-4. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
+5. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
    primária do TC, não a do equipamento protegido.
 
-5. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
+6. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
    banco de três enrolamentos exige remover TODAS as pernas do nó-estrela; e se o
    equipamento novo já está na base, o cenário "antes" é o contrafactual — remova-o.
 

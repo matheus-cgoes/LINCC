@@ -1,14 +1,20 @@
 # Exemplo de uso
 
 O protocolo de trabalho está no próprio código, então o pedido pode ser curto. Anexe
-`lincc_bundle.py` e o caso `.ANA`, e descreva só o estudo.
+`lincc_bundle.py`, o caso `.ANA` e os relatórios do ANAFAS do mesmo caso, e descreva só o
+estudo.
+
+Os relatórios são necessários porque toda base real traz centenas de eólicas e
+fotovoltaicas conectadas por conversor, e o motor confere a leitura do caso antes de
+devolver a corrente que as inclui — que é a de interesse regulatório. Ver
+[Validação do caso](../README.md#validação-do-caso-um-passo-obrigatório).
 
 ---
 
 ## O pedido
 
 ```
-Anexei o lincc_bundle.py e a base BR2612PJ.ANA.
+Anexei o lincc_bundle.py, a base BR2612PJ.ANA e os relatórios do ANAFAS desse caso.
 
 ESTUDO: entrada em operação da LT 500 kV Curral Novo do Piauí (6640) –
 São João do Piauí 2 (45019), circuito 1.
