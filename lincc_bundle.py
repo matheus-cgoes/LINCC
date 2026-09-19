@@ -512,7 +512,7 @@ def conciliar_bases(ana, pwf):
 class Solver:
     def __init__(self, model, drop_branches=None, drop_gens=None, block_btb=True,
                  dispatch_file=None,   # despacho inferido OBSOLETO: estados do DBAR ('d') cobrem o caso
-                 charging=False):
+                 charging=False, modo='completo'):
         """`charging`: representar a capacitância de linha (campos S1 e S0), em π.
 
         PADRÃO DESLIGADO, e a razão é medida. O relatório de impedâncias de barra do
@@ -530,6 +530,12 @@ class Solver:
         """
         self.M = model
         self.charging = bool(charging)
+        if modo not in ('sincronas', 'completo'):
+            raise ValueError(f"modo deve ser 'sincronas' ou 'completo', recebido {modo!r}")
+        # Modo global da instância: toda grandeza calculada por este Solver segue este
+        # modo, e os solvers internos de cenário o herdam. Um estudo tem um modo;
+        # misturar dentro do mesmo envelope produz margem fictícia.
+        self.modo = modo
         self.dropB = set(drop_branches) if drop_branches else set()   # {(bf,bt,nc)}
         self.dropG = set(drop_gens) if drop_gens else set()   # {bus}
         # Despacho inferido: usinas fora de operação na configuração-base do caso
@@ -922,7 +928,7 @@ class Solver:
         else: Z0=None
         return Z1,Z2,Z0
 
-    def fault(self, bus, kind='3F', Zf=0.0, Vf=1.0, modo='completo'):
+    def fault(self, bus, kind='3F', Zf=0.0, Vf=1.0, modo=None):
         """kind: '3F','1FT','2F','2FT'. Zf em pu. Retorna corrente em kA primários.
 
         modo='completo' (PADRÃO): inclui as injeções dos geradores de conversor pleno
@@ -947,8 +953,7 @@ class Solver:
                reconciliação barra a barra: reproduzem exatamente as colunas de kA e de MVA
                do relatório (escolher a outra fase erra até 0,5%).
         """
-        if modo not in self.MODOS:
-            raise ValueError(f"modo deve ser um de {self.MODOS}, recebido {modo!r}")
+        modo = self._modo(modo)
         if modo == 'completo' and self._tem_fc():
             self._exigir_validacao_completo()
             return self.fault_fc(bus, kind, Zf=Zf)
@@ -1437,11 +1442,9 @@ class Solver:
         # cuida do resto: a tensão da barra em falta NÃO é zero numa falta assimétrica, e
         # é justamente essa tensão que define a injeção de cada conversor.
         #
-        # A implementação anterior resolvia o estado TRIFÁSICO e reaproveitava a tensão
-        # equivalente na composição de sequências. Era aproximação de primeira ordem e
-        # errava grosseiramente: mediana de 14,49% e máximo de 146% na monofásica do caso
-        # de referência, contra 0,43% e 16,7% desta formulação. Na falta 3F a tensão
-        # terminal colapsa e as injeções saturam; na 1FT elas ficam na rampa da curva.
+        # Na falta 3F a tensão terminal colapsa e as injeções saturam; na assimétrica
+        # elas ficam na rampa da curva. Por isso o estado precisa ser resolvido com a
+        # falta correta, e não derivado do trifásico.
         #
         # Na falta assimétrica a tensão de sequência positiva da barra NÃO colapsa, e o
         # conversor responde à própria tensão terminal — tipicamente na RAMPA da curva do
@@ -1493,13 +1496,12 @@ class Solver:
         ic = Ia0 + a * Ia1 + a * a * Ia2
         return max(abs(ib), abs(ic)) * Ib
 
-    def contribution(self, bus, kind='3F', modo='completo'):
+    def contribution(self, bus, kind='3F', modo=None):
         """Contribuicao de corrente de cada elemento incidente na barra para uma falta
         solida na propria barra. kind='3F' (modulo da corrente de fase, seq. positiva)
         ou '0' (modulo de I0 por ramo, seq. zero). Retorna dict {(tipo,bf,bt,nc): I_kA}.
         So considera ramos EM SERVICO (fora de dropB). Base: KCL fecha na corrente total."""
-        if modo not in self.MODOS:
-            raise ValueError(f"modo deve ser um de {self.MODOS}, recebido {modo!r}")
+        modo = self._modo(modo)
         kvb=self.M.bus_kv.get(bus,0)
         if not kvb: return {}
         Ib=SB/(np.sqrt(3)*kvb)
@@ -1570,11 +1572,15 @@ class Solver:
             if b['nc']==nc and {b['bf'],b['bt']}=={bf,bt}: return b
         return None
 
-    def branch_current(self, fault_bus, bf, bt, nc, kind='3F', Zf=0.0):
+    def branch_current(self, fault_bus, bf, bt, nc, kind='3F', Zf=0.0, modo=None):
         """Corrente de fase (kA primarios) num ramo QUALQUER para uma falta em fault_bus.
         Funciona para ramo incidente, a N barras de distancia, ou uma linha qualquer.
         Para LINHAS calcula as tres sequencias; para TRAFOS retorna so seq positiva
-        (o I0 de enrolamento nao e serie simples entre as mesmas barras)."""
+        (o I0 de enrolamento nao e serie simples entre as mesmas barras).
+
+        Respeita o MODO da instancia. O perfil de sequencias e resolvido na rede passiva;
+        no modo completo o resultado e escalado pela razao medida na barra em falta, que
+        e o efeito das fontes de conversor."""
         prof=self._seq_profile(fault_bus, kind, Zf)
         if prof is None: return None
         br=self._find_branch(bf,bt,nc)
@@ -1594,10 +1600,11 @@ class Solver:
         I0=dI(prof['V0'],self.I0P,z0) if br['tipo']=='L' else 0j
         a=np.exp(2j*np.pi/3)
         Ia=I0+I1+I2; Ib2=I0+a*a*I1+a*I2; Ic=I0+a*I1+a*a*I2
-        return dict(Ia=abs(Ia)*Ib,Ib=abs(Ib2)*Ib,Ic=abs(Ic)*Ib,
-                    Imax=max(abs(Ia),abs(Ib2),abs(Ic))*Ib,
-                    I1=abs(I1)*Ib,I2=abs(I2)*Ib,I0=abs(I0)*Ib,kV=kvb,
-                    seqonly=(br['tipo']!='L'))
+        f=self._fator_fc(fault_bus, kind, modo)
+        return dict(Ia=abs(Ia)*Ib*f,Ib=abs(Ib2)*Ib*f,Ic=abs(Ic)*Ib*f,
+                    Imax=max(abs(Ia),abs(Ib2),abs(Ic))*Ib*f,
+                    I1=abs(I1)*Ib*f,I2=abs(I2)*Ib*f,I0=abs(I0)*Ib*f,kV=kvb,
+                    seqonly=(br['tipo']!='L'), modo=self._modo(modo), fator_fc=f)
 
     def bus_voltage(self, fault_bus, obs_bus, kind='3F', Zf=0.0):
         """Tensoes de fase (pu) numa barra observada durante uma falta em fault_bus.
@@ -1611,7 +1618,8 @@ class Solver:
         return dict(Va=abs(Va),Vb=abs(Vb),Vc=abs(Vc),V1=abs(V1),V2=abs(V2),V0=abs(V0),
                     Va_c=Va,V1_c=V1,V0_c=V0)
 
-    def line_end_open(self, bf, bt, nc, closed, kind='3F', p=1.0, Zf=0.0):
+    def line_end_open(self, bf, bt, nc, closed, kind='3F', p=1.0, Zf=0.0,
+                      modo=None):
         """Falta na linha (bf,bt,nc) com o terminal remoto ABERTO.
 
         Condição de abertura sequencial de disjuntor: o terminal oposto já abriu e a
@@ -1636,10 +1644,32 @@ class Solver:
             return None
         p = min(max(float(p), 0.0), 1.0)
         drop = list(self.dropB) + [(br['bf'], br['bt'], br['nc'])]
-        S2 = Solver(self.M, drop_branches=drop); S2.factor(avisar=False)
+        modo = self._modo(modo)
+        S2 = Solver(self.M, drop_branches=drop, charging=self.charging, modo=modo)
+        S2.factor(avisar=False)
+        if modo == 'completo' and S2._tem_fc():
+            # A liberação vem de quem chamou: este é um cenário derivado do mesmo caso.
+            S2.validado_completo = bool(getattr(self, 'validado_completo', False))
+            S2._selo_completo = getattr(self, '_selo_completo', None)
+            S2._exigir_validacao_completo()
         Z1, _, Z0 = S2.zth(closed)
         if Z1 is None:
             return None
+        fator_fc = 1.0
+        if modo == 'completo' and S2._tem_fc():
+            # As fontes de conversor elevam a corrente. Em p→0 o estado é resolvido
+            # direto por fault_fc, que é exato; para p>0 aplica-se a mesma razão ao
+            # Thévenin do ponto, porque a injeção varia pouco ao longo da linha perto do
+            # terminal e a alternativa — resolver o estado num nó intermediário — exige
+            # inserir a barra na rede. Em p=0 o resultado é exato (18.216 A contra 18.211
+            # medidos no caso de referência); ao longo da linha é aproximação declarada.
+            try:
+                base = S2.fault(closed, kind, modo='sincronas')
+                comf = S2.fault_fc(closed, kind)
+                if base and comf:
+                    fator_fc = comf / base
+            except Exception:
+                fator_fc = 1.0
         z1L = complex(br['R1'], br['X1']) / 100
         z0L = (complex(br['R0'], br['X0']) / 100
                if (br.get('R0') is not None and br.get('X0') is not None) else None)
@@ -1665,10 +1695,10 @@ class Solver:
             den = z1f * z2f + z1f * z0t + z2f * z0t
             ib = (z0t - a * z2f) / den
             ic = (z0t - a.conjugate() * z2f) / den
-            return np.sqrt(3) * max(abs(ib), abs(ic)) * Ib
+            return np.sqrt(3) * max(abs(ib), abs(ic)) * Ib * fator_fc
         else:
             return None
-        return abs(I) * Ib
+        return abs(I) * Ib * fator_fc
 
     def varredura_line_end_open(self, bf, bt, nc, closed, kinds=('3F', '1FT', '2F', '2FT'),
                                 pontos=(0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0)):
@@ -1686,7 +1716,7 @@ class Solver:
                 saida[kind] = serie
         return saida
 
-    def fault_on_branch(self, bf, bt, nc, p, kind='3F', Zf=0.0):
+    def fault_on_branch(self, bf, bt, nc, p, kind='3F', Zf=0.0, modo=None):
         """Falta a fracao p (0..1, medida a partir de bf) ao longo de um RAMO SERIE
         (linha, perna de trafo, reator serie). Insere no de falta F que divide a impedancia
         em p*Z (bf->F) e (1-p)*Z (F->bt). Retorna dict com Icc em F e correntes que cada
@@ -1714,7 +1744,12 @@ class Solver:
         Mm.branches += [seg(p,sbf,F), seg(1-p,F,sbt)]
         has_mut=any({m['bf1'],m['bt1']}=={sbf,sbt} or {m['bf2'],m['bt2']}=={sbf,sbt}
                     for m in self.M.mutuas)
-        S2=Solver(Mm, block_btb=False); S2.factor()
+        S2=Solver(Mm, block_btb=False, charging=self.charging, modo=self._modo(modo))
+        S2.factor(avisar=False)
+        if S2.modo=='completo' and S2._tem_fc():
+            # cenario derivado do mesmo caso: a liberacao acompanha a instancia de origem
+            S2.validado_completo=bool(getattr(self,'validado_completo',False))
+            S2._selo_completo=getattr(self,'_selo_completo',None)
         out={'kV':kvL,'p':p,'mutua_aprox':has_mut}
         out['If']=S2.fault(F,kind)
         ci=S2.branch_current(F, sbf,F,br['nc'],kind)
@@ -1726,7 +1761,7 @@ class Solver:
             out['3I0_term_%d'%sbt]=3*cj['I0'] if cj else None
         return out
 
-    def fault_on_shunt(self, bus, p, kind='1FT', Zf=0.0):
+    def fault_on_shunt(self, bus, p, kind='1FT', Zf=0.0, modo=None):
         """Falta a fracao p (0..1, a partir da BARRA em direcao ao neutro/terra) ao longo de um
         REATOR SHUNT ligado a 'bus'. Insere no F: bus --p*X-- F, F --(1-p)*X-- terra; falta em F.
         Para p->1 (perto do neutro) a corrente cai — curva de sensibilidade do 87/REF do reator."""
@@ -1752,7 +1787,12 @@ class Solver:
         for k in ('X1','X0'):
             if resid.get(k) is not None and np.isfinite(resid[k]): resid[k]=resid[k]*(1-p)
         Mm.shunts=list(Mm.shunts)+[resid]
-        S2=Solver(Mm, block_btb=False); S2.factor()
+        S2=Solver(Mm, block_btb=False, charging=self.charging, modo=self._modo(modo))
+        S2.factor(avisar=False)
+        if S2.modo=='completo' and S2._tem_fc():
+            # cenario derivado do mesmo caso: a liberacao acompanha a instancia de origem
+            S2.validado_completo=bool(getattr(self,'validado_completo',False))
+            S2._selo_completo=getattr(self,'_selo_completo',None)
         return {'kV':kvb,'p':p,'If':S2.fault(F,kind),
                 'I_terminal':(lambda c: c['Imax'] if c else None)(S2.branch_current(F,bus,F,'RT',kind))}
 
@@ -1808,6 +1848,34 @@ class Solver:
             if abs(inj) > 0:
                 out[('DEOL', bus, 0, '')] = abs(inj) * Ib
         return out
+
+    def _modo(self, modo=None):
+        """Modo efetivo desta chamada. `None` usa o da instância, que é o normal.
+
+        Passar `modo` explicitamente é exceção — serve para comparar os dois num mesmo
+        estudo, e nesse caso a diferença tem de ser declarada no relatório.
+        """
+        m = modo or getattr(self, 'modo', 'completo')
+        if m not in ('sincronas', 'completo'):
+            raise ValueError(f"modo deve ser 'sincronas' ou 'completo', recebido {m!r}")
+        return m
+
+    def _fator_fc(self, bus, kind='3F', modo=None):
+        """Razão entre o modo completo e o Thévenin puro na barra, ou 1,0.
+
+        Usado pelas grandezas derivadas do perfil de sequências — corrente de ramo,
+        tensão de barra, falta intermediária — que são calculadas na rede passiva e
+        precisam do efeito das fontes de conversor aplicado.
+        """
+        if self._modo(modo) != 'completo' or not self._tem_fc():
+            return 1.0
+        try:
+            self._exigir_validacao_completo()
+            base = self.fault(bus, kind, modo='sincronas')
+            comf = self.fault_fc(bus, kind)
+            return (comf / base) if (base and comf) else 1.0
+        except Exception:
+            return 1.0
 
     def _tem_fc(self):
         """O caso tem geradores de conversor pleno?
@@ -2011,7 +2079,7 @@ def branches_at(model, bus, tipos=('L','T')):
 
 # ===================== motor de protecao =====================
 
-def recomposicao_87b(model, bus, kinds=('3F','1FT'), modo='sincronas'):
+def recomposicao_87b(model, bus, kinds=('3F','1FT'), modo='completo'):
     """ICC_MIN de recomposicao para 87B: falta na barra energizada por UM elemento de cada vez.
     Para cada ramo (L ou perna 138 de banco de trafo) incidente na barra, isola a barra a esse
     unico elemento (dropa todos os demais incidentes) e calcula a falta. Retorna
@@ -2021,7 +2089,7 @@ def recomposicao_87b(model, bus, kinds=('3F','1FT'), modo='sincronas'):
     tab=[]; mins={k:float('inf') for k in kinds}
     for keep in inc:
         drop=[b for b in inc if b!=keep]
-        S=Solver(model, drop_branches=drop); S.factor(avisar=False)
+        S=Solver(model, drop_branches=drop, modo=modo); S.factor(avisar=False)
         if modo=='completo':
             # A recomposição monta dezenas de cenários; cada um é um Solver novo, e o
             # bloqueio do modo completo é por instância. Propaga-se a liberação, porque a
@@ -2041,7 +2109,7 @@ def recomposicao_87b(model, bus, kinds=('3F','1FT'), modo='sincronas'):
 
 
 def envelope_contribuicoes(model, barra, tipos=('3F', '1FT', '2F', '2FT'),
-                           vizinhanca=1, p_close_in=0.005, solver=None):
+                           vizinhanca=1, p_close_in=0.005, solver=None, modo=None):
     """Envelope de correntes por bay, para ajuste de proteção de barra.
 
     Executa o conjunto de casos que um estudo de barra pede, sem que seja preciso
@@ -2067,7 +2135,7 @@ def envelope_contribuicoes(model, barra, tipos=('3F', '1FT', '2F', '2FT'),
     considera apenas cenários em que o bay está em serviço e a corrente é não nula: um
     bay retirado não define mínimo de sensibilidade.
     """
-    S0 = solver or Solver(model)
+    S0 = solver or Solver(model, modo=modo or 'completo')
     if not hasattr(S0, 'luP'):
         S0.factor(avisar=False)
     incid = [(br['tipo'], br['bf'], br['bt'], br['nc'])
@@ -2104,7 +2172,8 @@ def envelope_contribuicoes(model, barra, tipos=('3F', '1FT', '2F', '2FT'),
         chave = tuple(sorted(drop))
         if chave not in cache:
             try:
-                S = S0 if not drop else Solver(model, drop_branches=list(drop))
+                S = S0 if not drop else Solver(model, drop_branches=list(drop),
+                                               modo=getattr(S0, 'modo', 'completo'))
                 if drop:
                     S.factor(avisar=False)
                 cache[chave] = S
@@ -2183,10 +2252,10 @@ def tabela_envelope(env, model=None, largura=46):
 _KINDS = ('3F', '1FT', '2F', '2FT')
 
 
-def _solver(model, drop=None, modo='sincronas'):
+def _solver(model, drop=None, modo='completo'):
     # avisar=False: numa chamada de alto nível o aviso apareceria uma vez por cenário
     # interno — o relatório declara o modo no retorno, que é onde interessa.
-    S = Solver(model, drop_branches=list(drop) if drop else None)
+    S = Solver(model, drop_branches=list(drop) if drop else None, modo=modo)
     S.factor(avisar=False)
     if modo == 'completo':
         S.liberar_completo_sem_gabarito('chamada de alto nível sem gabarito do caso')
@@ -2194,7 +2263,7 @@ def _solver(model, drop=None, modo='sincronas'):
 
 
 def impacto_entrada(model, ramos, limiar=10.0, kinds=_KINDS, kv_min=69.0,
-                    modo='sincronas', i_min_kA=0.1):
+                    modo='completo', i_min_kA=0.1):
     """Impacto da entrada em operação de um equipamento na evolução de curto-circuito.
 
     `ramos` são os ramos do equipamento NOVO, como [(bf, bt, nc), ...]. Se o equipamento
@@ -2239,7 +2308,7 @@ def impacto_entrada(model, ramos, limiar=10.0, kinds=_KINDS, kv_min=69.0,
                 ramos=ramos)
 
 
-def relatorio_curto(model, barra, kinds=_KINDS, modo='sincronas', solver=None):
+def relatorio_curto(model, barra, kinds=_KINDS, modo='completo', solver=None):
     """Relatório de curto-circuito de uma barra: correntes, Thévenin e contribuições.
 
     Devolve dict com 'correntes' {kind: kA}, 'zth' (Z1, Z2, Z0 em pu), 'contribuicoes'
@@ -2289,7 +2358,7 @@ def _k0(br):
     return (z0 - z1) / (3 * z1)
 
 
-def relatorio_protecao(model, tipo, elemento, modo='sincronas', dados=None,
+def relatorio_protecao(model, tipo, elemento, modo='completo', dados=None,
                        kinds=_KINDS, n1=True):
     """Relatório de proteção de um equipamento: linha, transformador, barra, reator ou
     capacitor série.

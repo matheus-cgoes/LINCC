@@ -52,8 +52,15 @@ OS DOIS MODOS — a escolha muda o resultado
 
     M = AnaModel("caso.ANA");  S = Solver(M);  S.factor()
 
-    S.fault(bus, kind)                     modo 'completo' (PADRÃO)
-    S.fault(bus, kind, modo='sincronas')   Thévenin puro, sem conversores
+    S = Solver(M)                          modo 'completo' (PADRÃO)
+    S = Solver(M, modo='sincronas')        Thévenin puro, sem conversores
+
+O MODO É PROPRIEDADE DO SOLVER, não parâmetro de cada chamada. Toda grandeza da instância
+— fault, contribution, branch_current, bus_voltage, line_end_open, fault_on_branch,
+fault_on_shunt, envelope — segue o mesmo modo, e os solvers internos de cenário o herdam.
+
+Passar `modo=` numa chamada isolada é exceção, para comparar os dois num mesmo estudo; a
+diferença tem de ser declarada no relatório.
 
 `completo` inclui as eólicas e fotovoltaicas conectadas por conversor (bloco DEOL) e é o
 padrão, por ser o número regulatório. `sincronas` é o Thévenin puro da Ybus e as exclui.
@@ -181,12 +188,10 @@ LINCC — guia de modos, tolerância e limitações conhecidas
       defeito. Trifásica e bifásica-terra: 100,000% das barras que convergem abaixo de 1%.
       Monofásica: 100,000% das barras com corrente acima de 0,5 kA, mediana 0,012%.
 
-      ATENÇÃO ao avaliar a monofásica em barra de parque: 91% das barras com fonte DEOL
-      têm corrente monofásica de referência ABAIXO DE 0,05 kA, porque o transformador do
-      parque é delta e a sequência zero não passa. Sobre 40 A, uma diferença de 5 A vira
-      "12% de erro" e contamina qualquer estatística agregada. Filtre por corrente com
-      significado físico antes de concluir — é o que separa erro de modelo de artefato de
-      denominador pequeno.
+      Ao avaliar a monofásica em barra de parque, filtre por corrente com significado
+      físico: 91% dessas barras têm corrente de referência abaixo de 0,05 kA, porque o
+      transformador do parque é delta e a sequência zero não passa. Sobre 40 A, uma
+      diferença de 5 A aparece como "12% de erro" em estatística agregada.
 
    c) Capacitância de linha (charging). Existe como opção, `Solver(M, charging=True)`,
       mas fica DESLIGADA por padrão: o gabarito de impedância de barra do ANAFAS não a

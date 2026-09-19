@@ -65,7 +65,7 @@ def test_mutua_paralelas_zero_usa_Zeq_com_acoplamento(mutuas):
 
 
 def test_mutua_nao_e_descartada_por_colapso_de_circuito(mutuas):
-    """Regressão do bug de identidade de segmento.
+    """Identidade do segmento acoplado inclui o circuito.
 
     Se a chave do segmento acoplado ignorar o número do circuito, os dois circuitos paralelos
     colapsam, a mútua é pulada e Z0 vira 0,40 em vez de 0,50 — sem lançar exceção.
@@ -103,8 +103,6 @@ def test_caso_minimo_correntes(minimo):
 def test_bifasica_terra_convencao_do_relatorio(radial):
     """2FT = √3·max(|Ib|,|Ic|), com Ib,c = (Z0 − a^{1,2}·Z2)/(Z1Z2+Z1Z0+Z2Z0).
 
-    Regressão: a implementação anterior usava uma expressão aproximada e errava por ~85%
-    contra o relatório de referência.
     """
     z1 = complex(0, 0.20)
     z0 = complex(0, 0.35 * 0.08 / 0.43)
@@ -126,7 +124,7 @@ def test_bifasica_terra_entre_trifasica_e_monofasica(radial):
 
 
 def test_le_arquivo_com_lf_puro(tmp_path):
-    """Regressão: .ANA normalizado para LF deve ser lido.
+    """.ANA normalizado para LF deve ser lido.
 
     O formato nativo é CRLF, mas basta o arquivo passar por um controle de versão com
     normalização de fim de linha para virar LF. Com split('\\r\\n') o arquivo inteiro vira
@@ -143,7 +141,7 @@ def test_le_arquivo_com_lf_puro(tmp_path):
 def test_referencia_de_angulo_e_decidida_por_fonte(tmp_path):
     """Cada gerador de conversor escolhe a própria referência de ângulo.
 
-    Regressão da correção mais cara do projeto. O ANAFAS resolve cada fonte com o ângulo
+    O ANAFAS resolve cada fonte com o ângulo
     da PRÓPRIA tensão convergida quando essa equação tem solução, e cai na tensão
     PRÉ-FALTA só na fonte que não tem — e declara qual usou, no rótulo ('FON.CORRENTE'
     contra 'FON.COR.Vpre'). Aplicar o fallback ao CONJUNTO produzia erro de +29% na
@@ -168,10 +166,8 @@ def test_referencia_de_angulo_e_decidida_por_fonte(tmp_path):
 def test_escala_da_injecao_usa_imax_e_nao_in():
     """A curva do SM 2.10 é normalizada; a escala absoluta da injeção é Imax.
 
-    Regressão: com o campo MVA preenchido, In = MVA/(√3·kV) fica abaixo de Imax e
-    escalar a curva por In subestima a injeção em exatamente Imax/In (1,50 no caso de
-    referência). Onde MVA está ausente, In = Imax e o erro não aparece — foi por isso
-    que passou despercebido em quase toda a base.
+    Com o campo MVA preenchido, In = MVA/(√3·kV) fica abaixo de Imax; onde MVA está
+    ausente, o manual manda tomar In = Imax e os dois limites coincidem.
     """
     reg = dict(Imax=0.09896, In=0.06600, phi=math.acos(0.1), K=1,
                Vmin=0.0, Vmax=9999.0, VP1=0.50, VP2=0.85)
@@ -358,9 +354,7 @@ def test_solver_nao_depende_do_motor_de_protecao():
 def test_falta_desequilibrada_no_modo_completo_usa_impedancia_equivalente():
     """Falta assimétrica: a rede de sequência positiva vê a falta como impedância.
 
-    Regressão. A formulação anterior resolvia o estado TRIFÁSICO e reaproveitava a tensão
-    equivalente, errando com mediana de 14,5% na monofásica. O correto é resolver o estado
-    com Z_eq no lugar de Zf: Z2+Z0+3Zf para 1FT, Z2+2Zf para 2F, Z2∥(Z0+3Zf) para 2FT —
+    O estado é resolvido com Z_eq no lugar de Zf: Z2+Z0+3Zf para 1FT, Z2+2Zf para 2F, Z2∥(Z0+3Zf) para 2FT —
     porque na falta assimétrica a tensão da barra NÃO é zero, e é ela que define a injeção
     de cada conversor.
 
@@ -398,7 +392,7 @@ def test_relatorio_curto(radial):
     assert set(r["correntes"]) == {"3F", "1FT", "2F", "2FT"}
     assert r["zth"]["Z1"] is not None
     assert r["correntes"]["3F"] == pytest.approx(radial.fault(2, "3F"), rel=1e-9)
-    assert r["modo"] == "sincronas"        # padrão das funções de alto nível
+    assert r["modo"] == "completo"        # o padrão é o modo regulatório
 
 
 def test_relatorio_protecao_por_tipo():
@@ -430,3 +424,61 @@ def test_monofasica_usa_a_propria_tensao_da_barra(radial):
     assert abs(V1) > 1e-6, "tensão de sequência positiva não colapsa na monofásica"
     _, If3, _ = radial._estado_fc_robusto(2, Zf=0.0)
     assert abs(If3 * 0.0) == 0.0          # na trifásica franca a tensão da barra é zero
+
+
+def test_line_end_open_respeita_o_modo():
+    """Terminal remoto aberto segue o modo, como qualquer outra grandeza.
+
+    O ANAFAS inclui as fontes de conversor também nesta condição: no caso de referência a
+    trifásica vale 18.211 A no modo completo e 17.463 em Thévenin puro. Sem DEOL os dois
+    coincidem, e é o que se verifica aqui.
+    """
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    S = Solver(M); S.factor(avisar=False)
+    for kind in ("3F", "1FT"):
+        a = S.line_end_open(1, 2, "1", 1, kind)
+        b = S.line_end_open(1, 2, "1", 1, kind, modo="sincronas")
+        assert a == pytest.approx(b, rel=1e-12)
+    # a varredura é contínua: sem salto entre p=0 e o primeiro ponto seguinte
+    serie = S.varredura_line_end_open(1, 2, "1", 1, kinds=("3F",))["3F"]
+    correntes = [i for _, i in serie]
+    assert all(a > b for a, b in zip(correntes, correntes[1:]))
+
+
+# ---------- consistência de modo ----------
+
+def test_modo_e_global_e_propagado():
+    """O modo é propriedade do Solver, e toda grandeza da instância o segue.
+
+    Um estudo tem um modo: misturar os dois dentro do mesmo critério produz margem
+    fictícia.
+    """
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    assert Solver(M).modo == "completo"               # padrão: o número regulatório
+    assert Solver(M, modo="sincronas").modo == "sincronas"
+    with pytest.raises(ValueError):
+        Solver(M, modo="inexistente")
+    S = Solver(M, modo="sincronas"); S.factor(avisar=False)
+    # toda grandeza derivada declara o modo sob o qual foi calculada
+    r = S.branch_current(2, 1, 2, "1", "3F")
+    assert r["modo"] == "sincronas"
+    assert S._modo() == "sincronas" and S._modo("completo") == "completo"
+
+
+def test_nenhum_solver_interno_ignora_o_modo():
+    """Solver criado dentro de um método herda modo e charging.
+
+    Verificação estrutural, lendo o próprio arquivo: um solver interno construído com os
+    padrões calcularia em modo diferente do resto do estudo, sem sinalizar.
+    """
+    import re
+    for arq in ("solver.py", "protecao.py"):
+        fonte = (pathlib.Path(__file__).parent.parent / "src" / "lincc"
+                 / arq).read_text(encoding="utf-8")
+        # a chamada pode ocupar várias linhas: casa até o parêntese de fechamento
+        for m in re.finditer(r"Solver\(\s*(?:M[m\w]*|model|self\.M)(?:[^()]|\([^()]*\))*\)",
+                             fonte, re.S):
+            trecho = m.group(0)
+            if "modo=" not in trecho:
+                raise AssertionError(
+                    f"{arq}: Solver interno sem modo -> {' '.join(trecho.split())[:80]}")

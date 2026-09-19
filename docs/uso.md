@@ -8,10 +8,20 @@ módulos, [`arquitetura.md`](arquitetura.md).
 
 ## Os dois modos
 
+O modo é **propriedade do Solver**, não parâmetro de cada chamada:
+
 ```python
-S.fault(bus, kind)                       # 'completo' — padrão
-S.fault(bus, kind, modo='sincronas')     # Thévenin puro
+S = Solver(M)                      # 'completo' — padrão
+S = Solver(M, modo='sincronas')    # Thévenin puro
 ```
+
+Toda grandeza da instância segue esse modo — `fault`, `contribution`, `branch_current`,
+`bus_voltage`, `line_end_open`, `fault_on_branch`, `fault_on_shunt`, `envelope` — e os
+solvers internos de cenário o herdam. Passar `modo=` numa chamada isolada é exceção, para
+comparar os dois num mesmo estudo, e a diferença tem de ser declarada.
+
+Um estudo tem um modo. Misturar os dois dentro do mesmo critério — ICC_MAX de um lado,
+ICC_MIN de outro — produz margem fictícia.
 
 **`completo`** inclui a contribuição de eólicas e fotovoltaicas conectadas por conversor
 (bloco `DEOL`). É o número regulatório, e por isso é o padrão.
@@ -264,10 +274,16 @@ conciliação, não só esta.
 
 ### Do `line_end_open`
 
-Erro conhecido contra o ANAFAS no caso de referência: **−4,11% em falta trifásica** e −0,41%
-em monofásica. A função remove a linha para simular o terminal aberto; o ANAFAS mantém o
-trecho pendurado e representa sua capacitância, que reduz a impedância vista. Conservador
-para sensibilidade e **não** conservador para dimensionamento.
+Segue o modo da instância. No caso de referência a trifásica com terminal aberto vale
+18.211 A no modo completo e 17.463 em Thévenin puro.
+
+Para `p > 0` o efeito das fontes é aplicado como razão medida no terminal, e não
+resolvendo o estado num nó intermediário — aproximação declarada. Em `p → 0` o resultado é
+exato.
+
+Falta assimétrica: a corrente da falta e a do TC diferem levemente, porque as fases sãs
+mantêm o trecho aberto energizado pela capacitância. No caso de referência, 33 A em
+14.062 A (0,2%), não representados.
 
 ### Gerais
 

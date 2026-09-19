@@ -18,7 +18,7 @@ import numpy as np
 from ._base import SB, zfin, zn3
 from .solver import Solver, branches_at
 
-def recomposicao_87b(model, bus, kinds=('3F','1FT'), modo='sincronas'):
+def recomposicao_87b(model, bus, kinds=('3F','1FT'), modo='completo'):
     """ICC_MIN de recomposicao para 87B: falta na barra energizada por UM elemento de cada vez.
     Para cada ramo (L ou perna 138 de banco de trafo) incidente na barra, isola a barra a esse
     unico elemento (dropa todos os demais incidentes) e calcula a falta. Retorna
@@ -28,7 +28,7 @@ def recomposicao_87b(model, bus, kinds=('3F','1FT'), modo='sincronas'):
     tab=[]; mins={k:float('inf') for k in kinds}
     for keep in inc:
         drop=[b for b in inc if b!=keep]
-        S=Solver(model, drop_branches=drop); S.factor(avisar=False)
+        S=Solver(model, drop_branches=drop, modo=modo); S.factor(avisar=False)
         if modo=='completo':
             # A recomposição monta dezenas de cenários; cada um é um Solver novo, e o
             # bloqueio do modo completo é por instância. Propaga-se a liberação, porque a
@@ -48,7 +48,7 @@ def recomposicao_87b(model, bus, kinds=('3F','1FT'), modo='sincronas'):
 
 
 def envelope_contribuicoes(model, barra, tipos=('3F', '1FT', '2F', '2FT'),
-                           vizinhanca=1, p_close_in=0.005, solver=None):
+                           vizinhanca=1, p_close_in=0.005, solver=None, modo=None):
     """Envelope de correntes por bay, para ajuste de proteção de barra.
 
     Executa o conjunto de casos que um estudo de barra pede, sem que seja preciso
@@ -74,7 +74,7 @@ def envelope_contribuicoes(model, barra, tipos=('3F', '1FT', '2F', '2FT'),
     considera apenas cenários em que o bay está em serviço e a corrente é não nula: um
     bay retirado não define mínimo de sensibilidade.
     """
-    S0 = solver or Solver(model)
+    S0 = solver or Solver(model, modo=modo or 'completo')
     if not hasattr(S0, 'luP'):
         S0.factor(avisar=False)
     incid = [(br['tipo'], br['bf'], br['bt'], br['nc'])
@@ -111,7 +111,8 @@ def envelope_contribuicoes(model, barra, tipos=('3F', '1FT', '2F', '2FT'),
         chave = tuple(sorted(drop))
         if chave not in cache:
             try:
-                S = S0 if not drop else Solver(model, drop_branches=list(drop))
+                S = S0 if not drop else Solver(model, drop_branches=list(drop),
+                                               modo=getattr(S0, 'modo', 'completo'))
                 if drop:
                     S.factor(avisar=False)
                 cache[chave] = S
@@ -190,10 +191,10 @@ def tabela_envelope(env, model=None, largura=46):
 _KINDS = ('3F', '1FT', '2F', '2FT')
 
 
-def _solver(model, drop=None, modo='sincronas'):
+def _solver(model, drop=None, modo='completo'):
     # avisar=False: numa chamada de alto nível o aviso apareceria uma vez por cenário
     # interno — o relatório declara o modo no retorno, que é onde interessa.
-    S = Solver(model, drop_branches=list(drop) if drop else None)
+    S = Solver(model, drop_branches=list(drop) if drop else None, modo=modo)
     S.factor(avisar=False)
     if modo == 'completo':
         S.liberar_completo_sem_gabarito('chamada de alto nível sem gabarito do caso')
@@ -201,7 +202,7 @@ def _solver(model, drop=None, modo='sincronas'):
 
 
 def impacto_entrada(model, ramos, limiar=10.0, kinds=_KINDS, kv_min=69.0,
-                    modo='sincronas', i_min_kA=0.1):
+                    modo='completo', i_min_kA=0.1):
     """Impacto da entrada em operação de um equipamento na evolução de curto-circuito.
 
     `ramos` são os ramos do equipamento NOVO, como [(bf, bt, nc), ...]. Se o equipamento
@@ -246,7 +247,7 @@ def impacto_entrada(model, ramos, limiar=10.0, kinds=_KINDS, kv_min=69.0,
                 ramos=ramos)
 
 
-def relatorio_curto(model, barra, kinds=_KINDS, modo='sincronas', solver=None):
+def relatorio_curto(model, barra, kinds=_KINDS, modo='completo', solver=None):
     """Relatório de curto-circuito de uma barra: correntes, Thévenin e contribuições.
 
     Devolve dict com 'correntes' {kind: kA}, 'zth' (Z1, Z2, Z0 em pu), 'contribuicoes'
@@ -296,7 +297,7 @@ def _k0(br):
     return (z0 - z1) / (3 * z1)
 
 
-def relatorio_protecao(model, tipo, elemento, modo='sincronas', dados=None,
+def relatorio_protecao(model, tipo, elemento, modo='completo', dados=None,
                        kinds=_KINDS, n1=True):
     """Relatório de proteção de um equipamento: linha, transformador, barra, reator ou
     capacitor série.
