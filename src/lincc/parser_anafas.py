@@ -248,3 +248,95 @@ class AnaModel:
                 self.deol.setdefault(nb, []).append(reg)
 
 
+
+
+# ====================================================================== #
+#  Leitura dos relatórios do ANAFAS                                      #
+# ====================================================================== #
+
+# Cada seção tem régua própria, medida no próprio relatório. Duas armadilhas tratadas
+# aqui, ambas descobertas por divergência numérica e ambas produzindo número plausível
+# e errado:
+#
+#   1. O cabeçalho do relatório de níveis é ACENTUADO ('RELATÓRIO DE NÍVEIS'). Delimitar
+#      seção procurando só por 'RELATORIO' faz a leitura atravessar para dentro dele.
+#   2. Valor mais largo que a coluna invade o campo anterior, e a leitura por posição
+#      absoluta perde o dígito inicial. Cada campo é lido da borda direita do campo
+#      anterior até a sua própria borda.
+_SECOES = {
+    'niveis': dict(
+        titulo='NÍVEIS DE CURTO-CIRCUITO', num=(2, 7), inicio=21,
+        campos=[('vbas', 27), ('i3m', 37), ('i3a', 44), ('i3xr', 53), ('i3as', 61),
+                ('i1m', 71), ('i1a', 78), ('i1xr', 87), ('i1as', 95),
+                ('i2m', 105), ('i2a', 112), ('i2xr', 121), ('i2as', 129)]),
+    'impedancias': dict(
+        titulo='RELATORIO DE IMPEDANCIAS DE BARRA', num=(1, 6), inicio=20, escala=1 / 100.0,
+        campos=[('z1m', 36), ('z1a', 53), ('z0m', 70), ('z0a', 87), ('zrm', 104), ('zra', 121)]),
+}
+_FIM_SECAO = ('RELATORIO DE', 'RELATÓRIO DE')
+_EM_PU = {'z1m', 'z0m', 'zrm'}
+
+
+def ler_relatorio(caminhos, secao='niveis'):
+    """Lê uma seção do relatório do ANAFAS. Devolve {barra: {campo: valor}}.
+
+    `caminhos` é um arquivo ou uma lista deles — as seções podem estar separadas.
+    `secao`: 'niveis' (correntes em kA, inclui os conversores) ou 'impedancias'
+    (Z1, Z0 e Z0+Z2 em pu, 10 decimais).
+    """
+    cfg = _SECOES.get(secao)
+    if cfg is None:
+        raise ValueError(f"secao deve ser uma de {sorted(_SECOES)}, recebido {secao!r}")
+    if isinstance(caminhos, (str, bytes)):
+        caminhos = [caminhos]
+    a_num, b_num = cfg['num']
+    escala = cfg.get('escala', 1.0)
+    saida = {}
+    for caminho in caminhos:
+        with open(caminho, 'rb') as f:
+            linhas = f.read().decode('cp1252', errors='replace').splitlines()
+        ini = next((i for i, ln in enumerate(linhas) if cfg['titulo'] in ln), None)
+        if ini is None:
+            continue
+        fim = next((i for i in range(ini + 1, len(linhas))
+                    if any(h in linhas[i] for h in _FIM_SECAO)), len(linhas))
+        for ln in linhas[ini + 1:fim]:
+            if len(ln) < 20 or not ln[a_num:b_num].strip().isdigit():
+                continue
+            d = saida.setdefault(int(ln[a_num:b_num]), {})
+            esq = cfg['inicio']
+            for nome, dir_ in cfg['campos']:
+                bruto = ln[esq:dir_].strip() if len(ln) >= esq else ''
+                esq = dir_
+                if not bruto:
+                    continue
+                try:
+                    v = float(bruto)
+                except ValueError:
+                    continue            # '*****' = estouro total do campo
+                d[nome] = v * escala if nome in _EM_PU else v
+    return saida
+
+
+def niveis_kA(caminhos, kind='3F'):
+    """Correntes de curto-circuito do relatório, prontas para `Solver.validar_completo`.
+
+    Devolve {barra: corrente_kA} para o tipo pedido: '3F', '1FT' ou '2FT'. É a seção que
+    INCLUI a contribuição dos geradores conectados por conversor, e portanto a âncora de
+    validação do modo completo.
+    """
+    col = {'3F': 'i3m', '1FT': 'i1m', '2FT': 'i2m'}.get(kind)
+    if col is None:
+        raise ValueError(f"kind deve ser '3F', '1FT' ou '2FT', recebido {kind!r}")
+    return {b: d[col] for b, d in ler_relatorio(caminhos, 'niveis').items()
+            if d.get(col, 0) > 0}
+
+
+def impedancias_pu(caminhos):
+    """Z1 e Z0 do relatório de impedâncias, para `Solver.conciliar`.
+
+    Devolve (z1, z0), cada um {barra: |Z| em pu}.
+    """
+    d = ler_relatorio(caminhos, 'impedancias')
+    return ({b: v['z1m'] for b, v in d.items() if v.get('z1m', 0) > 0},
+            {b: v['z0m'] for b, v in d.items() if v.get('z0m', 0) > 0})

@@ -1,11 +1,12 @@
 # LINCC — Linguagem Natural em Curto-Circuito
 
 Cálculo de curto-circuito e apoio a estudos de proteção para sistemas de transmissão,
-operado por conversa. Você descreve o estudo em português, o agente de IA traduz em
-chamadas, e todo número sai de um motor determinístico validado contra o ANAFAS.
+operado por conversa. Você descreve o estudo em português para um agente de IA, e ele
+conduz o cálculo num motor determinístico validado contra o ANAFAS.
 
-O trabalho que o LINCC dispensa é a montagem repetitiva de cenários e a transcrição de
-resultados. O esforço humano fica onde importa: a revisão técnica e o refinamento do ajuste.
+Não é preciso programar. O trabalho que a ferramenta dispensa é a montagem repetitiva de
+cenários e a transcrição de resultados; o esforço humano fica onde importa, na revisão
+técnica e no refinamento do ajuste.
 
 | Validação, caso de referência de 15.627 barras | |
 |---|---|
@@ -24,16 +25,17 @@ O critério é erro **individual por barra**, não erro médio.
 
 ## Começando
 
-Anexe dois arquivos na conversa com o agente:
+Abra uma conversa com um agente de IA e anexe três coisas:
 
-- **`lincc_bundle.py`** — o motor inteiro em um arquivo, sem instalação (está na raiz deste
-  repositório)
-- **o seu caso `.ANA`**
-- **os relatórios do ANAFAS do mesmo caso** — necessários para validar o cálculo antes de
-  emitir corrente (ver a seção seguinte)
+| Anexo | O que é |
+|---|---|
+| **`lincc_bundle.py`** | A ferramenta, em arquivo único. Baixe da raiz deste repositório |
+| **O seu caso** | O arquivo `.ANA` do horizonte do estudo |
+| **Os relatórios do ANAFAS** | Do mesmo caso. Servem para conferir o cálculo antes de emitir corrente |
 
-E descreva o estudo. Não é preciso enumerar tipos de defeito, contingências ou formato de
-saída: o protocolo está embutido no próprio código.
+Depois descreva o estudo, como faria para um colega. Não é necessário dizer quais tipos de
+defeito considerar, quais contingências montar nem em que formato apresentar: isso já está
+definido dentro da ferramenta.
 
 ```
 Anexei o lincc_bundle.py, a base BR2612PJ.ANA e os relatórios do ANAFAS desse caso.
@@ -47,97 +49,62 @@ Parte 2 — Relatório de proteção da barra 6640 e da LT, com o empreendimento
 operação. Relacione para que serve cada grandeza no ajuste.
 ```
 
-O resultado desse pedido, comentado, está em
+O que esse pedido produz está em
 [`examples/prompt-demonstracao.md`](examples/prompt-demonstracao.md).
 
 ---
 
-## Validação do caso: um passo obrigatório
+## Sobre os relatórios do ANAFAS
 
-As bases do ONS trazem centenas de eólicas e fotovoltaicas conectadas por conversor — são
-**400 a 500 registros** em cada horizonte. Perto delas, incluir ou não essa contribuição
-muda a corrente em mais de 40%, e é a corrente **com** as fontes que responde pelo número
-regulatório.
+As bases do ONS trazem centenas de eólicas e fotovoltaicas conectadas por conversor. Perto
+delas, considerar ou não a contribuição dessas usinas muda a corrente em mais de 40%, e é o
+valor **com** essa contribuição que responde pelo número de interesse regulatório.
 
-Por isso o motor pede uma conferência antes de devolver esse número, e ela vale para
-**qualquer caso real**:
+Para emitir esse valor com segurança, a ferramenta confere o próprio cálculo contra o
+relatório do caso antes de apresentar resultados. A razão é que ela lê o formato do arquivo,
+não um caso específico: um tipo de registro incomum poderia ser interpretado de forma
+errada sem que nada acusasse. A conferência fecha essa lacuna.
 
-```python
-S.validar_completo(niveis_kA, limite=1.0)
-```
+**Quais exportar do ANAFAS:** o relatório de **níveis de curto-circuito** e, se possível, o
+de **impedâncias de barra**. O primeiro é o que permite a conferência; o segundo dá uma
+verificação mais precisa.
 
-onde `niveis_kA` é `{barra: corrente_kA}` lido da seção **RELATÓRIO DE NÍVEIS DE
-CURTO-CIRCUITO** do relatório do ANAFAS **do mesmo caso**. Sem essa conferência, o cálculo
-que inclui os conversores não responde — o motor mostra o comando e as alternativas ao
-carregar o caso.
-
-**Por quê.** O motor lê o *formato* `.ANA`, não um caso específico. Um tipo de registro que
-não apareça no caso contra o qual o motor foi validado é ignorado em silêncio: o número
-sai, e pode sair errado sem nenhum aviso. Conferir contra o relatório do próprio caso é o
-que fecha essa lacuna. O modelo de cálculo em si já é validado — o que se confere aqui é a
-**leitura daquele arquivo**.
-
-### Quais relatórios exportar do ANAFAS
-
-| Relatório | Para que |
-|---|---|
-| **Níveis de curto-circuito** | Liberar o cálculo com os conversores. É o único que os inclui |
-| **Impedâncias de barra** | Conferir Z₁ e Z₀ com 10 decimais — o gabarito mais preciso |
-
-### Se o relatório não estiver disponível
-
-Duas saídas, e as duas precisam constar no estudo:
-
-```python
-S.liberar_completo_sem_gabarito()      # assume o risco; o selo registra a ausência
-S.fault(barra, kind, modo='sincronas') # Thévenin puro, sem as fontes de conversor
-```
-
-A primeira devolve o número regulatório sem conferência da leitura do caso —
-`S.selo_completo()['conferido_no_caso']` volta `False`, e é isso que se declara. A segunda
-é conservadora e não depende de nada, mas **não** é o número para dimensionamento perto de
-usina com conversor.
+**Se você não tiver os relatórios**, diga isso ao agente. Ele vai explicar as alternativas
+e perguntar como prosseguir — há como seguir sem eles, e o estudo registra essa condição.
 
 ---
 
 ## O que dá para pedir
 
 **Evolução de curto-circuito** pela entrada de um transformador ou de uma linha, com as
-barras que ultrapassam o gatilho de revisão e o tipo de defeito que governou.
+barras que ultrapassam o gatilho de revisão e o tipo de defeito responsável.
 
 **Relatório de proteção** de qualquer equipamento — linha, transformador, barra, reator ou
 capacitor — com as grandezas do tipo, os cenários de contingência, as funções que o
-Submódulo 2.11 exige e o que falta para parametrizar.
+Submódulo 2.11 exige e a lista do que ainda falta para parametrizar.
 
-**Envelope por bay** de uma subestação: maior e menor corrente de fase e de terra em cada
-vão, varrendo os quatro tipos de defeito, sistema completo e N-1, retirada de equipamento e
-terminal remoto aberto — com o cenário em que cada extremo ocorreu.
+**Envelope por vão** de uma subestação: maior e menor corrente de fase e de terra em cada
+vão, varrendo os quatro tipos de defeito, sistema completo e contingência simples, retirada
+de equipamento e terminal remoto aberto — com o cenário em que cada extremo ocorreu.
 
-**Insumos de ajuste**: impedâncias e fator k₀ para distância, passa-através para diferencial
-de transformador, corrente mínima de recomposição para diferencial de barra, curvas de tempo
-inverso IEC e IEEE.
+**Insumos de ajuste** de proteção: impedâncias e fator de compensação para distância,
+corrente passante para diferencial de transformador, corrente mínima de recomposição para
+diferencial de barra, curvas de tempo inverso IEC e IEEE.
 
-**Grandezas de regime permanente**, lendo também a base de fluxo de potência do ANAREDE:
-carregamento e capacidade por circuito, tensão de barra e o despacho de cada cenário.
+**Grandezas de regime permanente**, quando a base de fluxo de potência do ANAREDE também é
+anexada: carregamento e capacidade por circuito, tensão de barra e o despacho de cada
+cenário.
 
----
-
-## Em código
-
-```python
-from lincc import AnaModel, Solver, impacto_entrada, relatorio_protecao, tabela_envelope
-
-M = AnaModel("caso.ANA")
-S = Solver(M); S.factor()
-
-S.fault(BARRA, "3F")                          # corrente de falta, em kA primários
-impacto_entrada(M, [(BF, BT, NC)])            # evolução pela entrada de um equipamento
-relatorio_protecao(M, 'linha', (BF, BT, NC))  # relatório do equipamento
-```
+Dados que nenhuma base contém — relação de TC, ajuste de relés vizinhos, placa de
+equipamento — são solicitados quando fazem falta, em vez de estimados.
 
 ---
 
 ## Instalação
+
+Para uso por agente, nada a instalar: basta o arquivo `lincc_bundle.py`.
+
+Para trabalhar sobre o código:
 
 ```bash
 git clone https://github.com/matheus-cgoes/LINCC.git
@@ -150,10 +117,10 @@ Python 3.10+, com `numpy` e `scipy`.
 
 ## Documentação
 
-| | |
+| | Para quem |
 |---|---|
-| [`examples/prompt-demonstracao.md`](examples/prompt-demonstracao.md) | Exemplo completo, comentado |
-| [`docs/uso.md`](docs/uso.md) | Operação, modos, tolerância, limitações e API |
+| [`examples/prompt-demonstracao.md`](examples/prompt-demonstracao.md) | Quem vai usar: exemplo completo |
+| [`docs/uso.md`](docs/uso.md) | Quem vai programar: operação, modos, limitações e API |
 | [`docs/arquitetura.md`](docs/arquitetura.md) | Organização dos módulos |
 | [`docs/formato-ana.md`](docs/formato-ana.md) | Convenções do formato `.ANA` |
 | [`docs/mutuas.md`](docs/mutuas.md) | Acoplamento mútuo de sequência zero |

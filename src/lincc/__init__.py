@@ -13,21 +13,30 @@ PROTOCOLO DE TRABALHO — vale para toda chamada, sem precisar ser repetido no p
 1. Este motor é a fonte de verdade. Importe e use; não recrie a modelagem de memória, não
    reescreva o parser, não calcule nada à mão. Todo número de um estudo sai daqui.
 
-2. VALIDE O CASO ANTES DE EMITIR CORRENTE. Toda base real do ONS traz 400 a 500 eólicas e
-   fotovoltaicas conectadas por conversor, e o número regulatório é o que as inclui. O
-   motor só o devolve depois de conferir a leitura deste caso:
+2. VALIDE O CASO ANTES DE EMITIR CORRENTE, e conduza isso sozinho — o usuário não precisa
+   conhecer nem executar os comandos.
 
-       S.validar_completo(niveis_kA, limite=1.0)
+   Toda base real do ONS traz 400 a 500 eólicas e fotovoltaicas conectadas por conversor,
+   e o número regulatório é o que as inclui. O motor só o devolve depois de conferir a
+   leitura deste caso contra o relatório do ANAFAS do MESMO caso:
 
-   `niveis_kA` é {barra: corrente_kA} da seção 'RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO' do
-   relatório do ANAFAS DO MESMO CASO. Se os relatórios não estiverem anexados, PEÇA-OS
-   antes de prosseguir. Só se o usuário não os tiver:
+       from lincc import niveis_kA
+       selo = S.validar_completo(niveis_kA("RELATORIO.LST"), limite=1.0)
 
-       S.liberar_completo_sem_gabarito()       # e DECLARE que a leitura não foi conferida
-       S.fault(bus, kind, modo='sincronas')    # Thévenin puro, conservador
+   O que fazer conforme a situação, sem transferir a decisão técnica ao usuário:
 
-   Nunca escolha uma dessas saídas em silêncio: o estudo tem de dizer sob qual hipótese
-   os números foram calculados.
+   a) Relatório anexado -> valide e siga. Informe o resultado em uma linha ("caso
+      conferido contra o relatório, erro máximo X%").
+   b) Relatório NÃO anexado -> PEÇA-O ao usuário, explicando em linguagem simples: é o
+      relatório de níveis de curto-circuito do ANAFAS, do mesmo caso, e serve para
+      conferir a leitura do arquivo antes de emitir corrente.
+   c) Usuário não tem o relatório -> explique as duas alternativas em português corrente,
+      SEM mencionar nomes de função: ou você segue com o número que inclui as usinas de
+      conversor, sem essa conferência, ou usa o valor conservador que as exclui. Pergunte
+      qual ele prefere, execute (`liberar_completo_sem_gabarito()` ou
+      `modo='sincronas'`) e REGISTRE a hipótese no relatório final.
+
+   Nunca escolha em silêncio, e nunca devolva comando para o usuário executar.
 
 3. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
    capacidade de interrupção e carga máxima operativa NÃO estão no .ANA. As funções de
@@ -110,7 +119,8 @@ Chame `lincc.orientacao()` para o guia completo de tolerância e limitações co
 from ._base import SB, num, zfin, zn3
 from . import curvas, dados_externos, sm211, fluxo
 from .curvas import tempo, tms_para_tempo, CURVAS
-from .parser_anafas import AnaModel                    # base de curto-circuito (.ANA)
+from .parser_anafas import (AnaModel,                  # base de curto-circuito (.ANA)
+                            ler_relatorio, niveis_kA, impedancias_pu)
 from .parser_anarede import PwfModel, conciliar_bases  # base de fluxo de potência (.PWF)
 from .solver import Solver, branches_at                # motor de curto-circuito
 from .protecao import (recomposicao_87b,               # motor de proteção
@@ -121,6 +131,7 @@ __version__ = "0.3.0"
 __all__ = [
     # parsers
     "AnaModel", "PwfModel", "conciliar_bases",
+    "ler_relatorio", "niveis_kA", "impedancias_pu",
     # motor de curto-circuito
     "Solver", "branches_at",
     # motor de proteção

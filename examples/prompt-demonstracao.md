@@ -1,15 +1,13 @@
 # Exemplo de uso
 
-O protocolo de trabalho está no próprio código, então o pedido pode ser curto. Anexe
-`lincc_bundle.py`, o caso `.ANA` e os relatórios do ANAFAS do mesmo caso, e descreva só o
-estudo.
-
-Os relatórios são necessários porque toda base real traz centenas de eólicas e
-fotovoltaicas conectadas por conversor, e o motor confere a leitura do caso antes de
-devolver a corrente que as inclui — que é a de interesse regulatório. Ver
-[Validação do caso](../README.md#validação-do-caso-um-passo-obrigatório).
+Como fica um estudo do começo ao fim, sem escrever uma linha de código.
 
 ---
+
+## O que anexar
+
+O arquivo `lincc_bundle.py` (está na raiz deste repositório), o seu caso `.ANA` e os
+relatórios do ANAFAS desse mesmo caso.
 
 ## O pedido
 
@@ -25,72 +23,71 @@ Parte 2 — Relatório de proteção da barra 6640 e da LT, com o empreendimento
 operação. Relacione para que serve cada grandeza no ajuste.
 ```
 
+Não é preciso dizer quais tipos de defeito considerar, quais contingências montar nem em
+que formato responder. Isso já está definido dentro da ferramenta.
+
+---
+
 ## O que sai
 
 ### Parte 1 — impacto da entrada
 
-| Barra | Nome | kV | Antes | Depois | Variação | Governou |
+| Barra | Nome | kV | Antes | Depois | Variação | Defeito |
 |---|---|---|---|---|---|---|
-| 6640 | CURRAL-PI500 | 500 | 17,211 kA | 20,067 kA | +16,6% | 3F |
-| 45019 | SJ.PI2-PI500 | 500 | 17,531 kA | 19,975 kA | +13,9% | 2FT |
+| 6640 | CURRAL-PI500 | 500 | 17,211 kA | 20,067 kA | +16,6% | trifásico |
+| 45019 | SJ.PI2-PI500 | 500 | 17,531 kA | 19,975 kA | +13,9% | bifásico-terra |
 
 Duas barras ultrapassam o gatilho de 10%, e são os terminais da linha nova — os estudos de
 proteção dessas duas precisam de revisão.
 
-Repare que em 45019 quem governa é a bifásica-terra, não a trifásica. É por isso que os
-quatro tipos são varridos sempre.
+Repare que em 45019 quem governa é a falta bifásica-terra, não a trifásica. Por isso os
+quatro tipos são varridos sempre, mesmo quando o pedido não menciona.
 
 ### Parte 2 — relatório de proteção
 
-**Da linha:** impedâncias Z₁ e Z₀, fator k₀, potência nominal lida da base, correntes nos
-dois terminais, varredura da falta com terminal remoto aberto — de close-in à ponta — e os
-cenários N-1 no terminal local.
+**Da linha:** impedâncias de sequência positiva e zero, fator de compensação de terra,
+potência nominal lida da base, correntes nos dois terminais, varredura da falta com o
+terminal remoto aberto — do defeito junto ao disjuntor até a ponta oposta — e os cenários
+de contingência simples no terminal local.
 
-**Da barra:** envelope por bay nos nove elementos, com a maior e a menor corrente de fase e
-de terra em cada vão e o cenário de cada extremo, mais a corrente mínima de recomposição
-para o diferencial de barra.
+**Da barra:** para cada um dos nove vãos, a maior e a menor corrente de fase e de terra,
+com o cenário em que cada extremo ocorreu, mais a corrente mínima de recomposição para o
+diferencial de barra.
 
-Em ambos, as funções que o Submódulo 2.11 exige e a lista do que falta para parametrizar —
-relação de TC, placa, carga máxima — que o agente reporta em vez de estimar.
+Em ambos, as funções que o Submódulo 2.11 exige para o equipamento e a lista do que falta
+para parametrizar — relação de TC, placa, carga máxima — que o agente pede em vez de
+estimar.
 
 ### Para que serve cada grandeza
 
 | Grandeza | Uso no ajuste |
 |---|---|
 | Máximo de fase | suportabilidade de disjuntor, esforços, saturação de TC |
-| Mínimo de fase | sensibilidade, pickup de 51, alcance de zonas |
-| 3I₀ | funções de terra: 67N, 51N, 50/51R |
-| Corrente mínima de recomposição | limite inferior do 87B |
-| Z₁, Z₀ e k₀ | alcance das zonas de distância e compensação de sequência zero |
+| Mínimo de fase | sensibilidade, pickup das unidades temporizadas, alcance de zonas |
+| Corrente de terra (3I₀) | funções direcionais e de sobrecorrente de neutro |
+| Corrente mínima de recomposição | limite inferior do diferencial de barra |
+| Impedâncias e fator de compensação | alcance das zonas de distância |
 | Terminal remoto aberto | abertura sequencial de disjuntor, que dimensiona alcance |
 
 ---
 
-## Em código
+## Pedidos seguintes
 
-Se preferir chamar direto:
+A conversa continua: com o relatório em mãos, dá para pedir o ajuste das zonas de distância,
+o pickup e a temporização das unidades de sobrecorrente, a verificação do escopo de proteção
+contra o Submódulo 2.11, ou a varredura de contingências em outras barras.
 
-```python
-from lincc import AnaModel, impacto_entrada, relatorio_protecao, tabela_envelope
-
-M = AnaModel("BR2612PJ.ANA")
-
-impacto_entrada(M, [(6640, 45019, '1')])
-relatorio_protecao(M, 'linha', (6640, 45019, '1'))
-relatorio_protecao(M, 'barra', 6640)
-```
-
-As funções aceitam ajustes de escopo — limiar, tensão mínima, modo, tipos de defeito — e os
-métodos do `Solver` continuam disponíveis para o que sair do padrão. Guia completo em
-[`docs/uso.md`](../docs/uso.md) ou chamando `lincc.orientacao()`.
+Se faltar algum dado que nenhuma base contém, o agente informa qual é e para que serve, em
+vez de adotar um valor por conta própria.
 
 ## Três pontos de atenção
 
-**O sentido da comparação depende da base.** Se o equipamento já está representado, o
-cenário "antes" é o contrafactual e os ramos são removidos. Se ainda não está, é preciso um
-caso de horizonte que o contenha.
+**O sentido da comparação depende da base.** Se o equipamento novo já está representado no
+caso, o cenário "antes" é obtido retirando-o. Se ainda não está, é preciso um caso de
+horizonte que o contenha — vale conferir antes de pedir o estudo.
 
-**Banco de três enrolamentos** é modelado com nó-estrela: para retirá-lo de um cenário,
-todas as pernas entram na lista.
+**Bancos de transformadores** são representados com um ponto interno adicional; retirá-los
+de um cenário exige remover todas as conexões, e o agente cuida disso.
 
-**O identificador de circuito é texto**, `'1'` e não `1`.
+**Identificação de circuito** acompanha o número do caso: informe o circuito como aparece no
+diagrama ou no arquivo.

@@ -482,3 +482,32 @@ def test_nenhum_solver_interno_ignora_o_modo():
             if "modo=" not in trecho:
                 raise AssertionError(
                     f"{arq}: Solver interno sem modo -> {' '.join(trecho.split())[:80]}")
+
+
+def test_leitura_de_relatorio_do_anafas(tmp_path):
+    """Ler os relatórios faz parte do pacote, não de um script auxiliar.
+
+    É o que permite ao agente validar o caso sem reimplementar a leitura de colunas — e
+    sem transferir o procedimento ao usuário. O cabeçalho da seção de níveis é ACENTUADO,
+    e a régua é medida a partir da borda direita de cada campo.
+    """
+    from lincc import ler_relatorio, niveis_kA, impedancias_pu
+    rel = tmp_path / "rel.LST"
+    linha = "     27 CPAUL2-SP500  500.0     26.64 -86.58    16.71   68.88     18.37"
+    rel.write_bytes(
+        (" RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO \n"
+         "   NUM.     NOME      VBAS   MOD(kA)\n"
+         + linha + "\n99999\n").encode("cp1252"))
+    d = ler_relatorio(str(rel), "niveis")
+    assert 27 in d
+    assert d[27]["vbas"] == pytest.approx(500.0)
+    assert d[27]["i3m"] == pytest.approx(26.64)      # trifásica
+    assert d[27]["i1m"] == pytest.approx(18.37)      # monofásica
+    assert niveis_kA(str(rel))[27] == pytest.approx(26.64)
+    assert niveis_kA(str(rel), kind="1FT")[27] == pytest.approx(18.37)
+    with pytest.raises(ValueError):
+        niveis_kA(str(rel), kind="inexistente")
+    with pytest.raises(ValueError):
+        ler_relatorio(str(rel), "secao_inexistente")
+    # seção ausente devolve vazio, sem levantar
+    assert impedancias_pu(str(rel)) == ({}, {})
