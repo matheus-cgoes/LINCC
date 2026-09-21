@@ -32,6 +32,7 @@ Abra uma conversa com um agente de IA e anexe três coisas:
 | **`lincc_bundle.py`** | A ferramenta, em arquivo único. Baixe da raiz deste repositório |
 | **O seu caso** | O arquivo `.ANA` do horizonte do estudo |
 | **Os relatórios do ANAFAS** | Do mesmo caso. Servem para conferir o cálculo antes de emitir corrente |
+| **Os casos do ANAREDE** *(opcional)* | Os arquivos `.PWF` dos cenários de carga do mesmo horizonte. Trazem carregamento, capacidade dos circuitos e o despacho de cada cenário |
 
 Depois descreva o estudo, como faria para um colega. Não é necessário dizer quais tipos de
 defeito considerar, quais contingências montar nem em que formato apresentar: isso já está
@@ -95,9 +96,15 @@ e o limite que governa. Quando uma função não tem faixa possível, o relatór
 corrente passante para diferencial de transformador, corrente mínima de recomposição para
 diferencial de barra, curvas de tempo inverso IEC e IEEE.
 
-**Grandezas de regime permanente**, quando a base de fluxo de potência do ANAREDE também é
-anexada: carregamento e capacidade por circuito, tensão de barra e o despacho de cada
-cenário.
+**Curto-circuito por cenário de operação**, quando os casos do ANAREDE são anexados. O
+ANAFAS representa a rede sempre completa, com todas as usinas gerando; os cenários de carga
+leve, média e pesada, diurnos e noturnos, retiram as que estão paradas. O menor curto — que
+dimensiona a sensibilidade da proteção — costuma cair bem abaixo do valor da rede completa,
+sobretudo à noite, quando as usinas solares saem. O relatório diz em qual cenário cada
+extremo ocorreu.
+
+**Carga máxima dos circuitos** a partir das capacidades declaradas no ANAREDE, usada nos
+critérios de proteção em vez de ser pedida a você.
 
 Dados que nenhuma base contém — relação de TC, ajuste de relés vizinhos, placa de
 equipamento — são solicitados quando fazem falta, em vez de estimados.

@@ -50,12 +50,20 @@ class PwfModel:
 
     # Réguas derivadas dos cabeçalhos dos próprios blocos (0-based, fim exclusivo).
     # DBAR: (Num)OETGb(   nome   )Gl( V)( A)( Pg)( Qg)( Qn)( Qm)(Bc  )( Pl)( Ql)( Sh)Are(Vf)M
-    R_DBAR = dict(num=(0, 5), estado=(5, 6), tipo=(6, 7), grupo_base=(8, 9),
+    # Conferido contra o .ANA nas mesmas barras: estado em [6:7] ('L'/'D'), tipo em
+    # [7:8] ('1' PV, '2' referência, branco PQ) e grupo base de tensão em [8:10] — dois
+    # caracteres, como no DGBT. Os grupos principais batem 100% com a tensão do .ANA.
+    R_DBAR = dict(num=(0, 5), estado=(6, 7), tipo=(7, 8), grupo_base=(8, 10),
                   nome=(10, 22), V=(24, 28), A=(28, 32), Pg=(32, 37), Qg=(37, 42),
                   Qn=(42, 47), Qm=(47, 52), Bc=(52, 58), Pl=(58, 63), Ql=(63, 68),
                   Sh=(68, 73), area=(73, 76), Vf=(76, 80))
     # DLIN: (De )d O d(Pa )NcEPM( R% )( X% )(Mvar)(Tap)(Tmn)(Tmx)(Phs)(Bc  )(Cn)(Ce)Ns(Cq)
-    R_DLIN = dict(bf=(0, 5), estado=(7, 8), bt=(10, 15), nc=(15, 17), R=(20, 26),
+    # O cabeçalho é (De )d O d(Pa )NcEPM: o 'O' em [7] é o código de OPERAÇÃO de edição
+    # do ANAREDE (adição, eliminação, modificação), e o ESTADO do circuito é o 'E' em
+    # [17] ('D' desligado). Confundir os dois deixa em serviço circuitos desligados —
+    # chaves de interligação com X de 0,001% entre barras com ângulos diferentes, que
+    # produzem fluxo de milhões de MW. Conferido pelo balanço de potência ativa.
+    R_DLIN = dict(bf=(0, 5), estado=(17, 18), bt=(10, 15), nc=(15, 17), R=(20, 26),
                   X=(26, 32), Mvar=(32, 38), Tap=(38, 43), Tmn=(43, 48), Tmx=(48, 53),
                   Phs=(53, 58), Bc=(58, 64), Cn=(64, 68), Ce=(68, 72), Cq=(74, 78))
     # DGER: (No ) O (Pmn ) (Pmx ) ( Fp) (FpR) (FPn) (Fa) (Fr) (Ag) ( Xq) (Sno) (Est)
@@ -128,10 +136,11 @@ class PwfModel:
         grupos = {}
         for i in bl.get('DGBT', []):
             for ln in self._registros(L, i):
-                g = ln[0:2].strip()
-                v = _num(ln[2:8])
+                g = ln[0:2].strip()            # grupo, dois caracteres
+                v = _num(ln[2:8])              # tensão base, kV
                 if g and v:
                     grupos[g] = v
+        self.grupos_tensao = grupos
         for nb, d in self.barras.items():
             kv = grupos.get(d.get('grupo_base'))
             if kv:

@@ -244,6 +244,39 @@ desvio do `line_end_open`, porque a função remove a linha e a capacitância sa
 
 ---
 
+## Base de fluxo de potência (ANAREDE)
+
+```python
+from lincc import PwfModel, conciliar_bases
+from lincc.fluxo import fluxos, carga_maxima, aplicar_despacho, curto_por_cenario
+
+P = PwfModel("cenario.PWF")
+conciliar_bases(M, P)                        # casamento de barras entre as bases
+carga_maxima(cenarios, bf, bt, nc)           # capacidades e fluxo máximo observado
+curto_por_cenario(M, cenarios, barras)       # envelope de curto entre cenários
+```
+
+**Leitura.** Estado da barra em `[6]`, grupo base em `[8:10]` (tensão pelo `DGBT`), estado
+do circuito em `[17]`. As colunas `[5]` do DBAR e `[7]` do DLIN são o código de operação
+de edição do ANAREDE, não o estado. Barra desligada tira de serviço os circuitos ligados a
+ela. Capacidade `9999` é o marcador de "sem limite".
+
+**Fluxo por circuito** é avaliado sobre as tensões convergidas gravadas no arquivo, com três
+casas na tensão e cerca de uma no ângulo. A incerteza resultante tem mediana de 2,3% nas
+linhas de 230 kV e acima, e vem em `incerteza_MVA`. Em chave de interligação (impedância
+quase nula) o fluxo não pode ser obtido das tensões e é marcado `calculavel=False`.
+Capacitores série controlados (`DCSC`) e conversoras de elo CC não são lidos.
+
+**Carga máxima** é o menor entre a capacidade de emergência e a de equipamento, quando ambas
+existem: o circuito não carrega além do que o equipamento terminal admite.
+
+**Despacho.** Fonte com geração nula no cenário é retirada do caso de curto; impedâncias e
+topologia ficam intactas. Conversores casam direto pelo número (95%). Geradores síncronos
+fora do fluxo sobem pela rede até três barras em busca de geração declarada. Os sem
+correspondência entram ligados no máximo e desligados no mínimo, e a distância entre as
+duas hipóteses vem como `incerteza_mapeamento_pct`. Os valores por cenário não têm gabarito
+no ANAFAS, que só calcula a rede completa.
+
 ## Limitações conhecidas
 
 ### Do modo completo

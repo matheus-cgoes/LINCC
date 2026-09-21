@@ -535,3 +535,74 @@ def test_ajuste_sobrecorrente_devolve_faixas_e_nao_escolhe():
     r = ajuste_sobrecorrente(M, "linha", (1, 2, "1"),
                              dados={"carga_max_lt": 500}, criterios={"f51_carga": 1.5})
     assert r["funcoes"]["51"]["pickup"] == pytest.approx(750.0)
+
+
+# ---------- base de fluxo de potência (ANAREDE) ----------
+
+def _pwf_sintetico(tmp_path, pg_barra1=100.0, estado_linha=" "):
+    """Caso .PWF mínimo, montado pelas réguas conferidas contra o caso real."""
+    def col(pares, w=90):
+        b = [" "] * w
+        for s, t in pares:
+            for k, ch in enumerate(str(t)):
+                b[s + k] = ch
+        return "".join(b).rstrip()
+    L = ["TITU", "CASO SINTETICO", "DGBT", "(G ( kV)", " C  138.", "99999", "DBAR",
+         "(Num)OETGb(   nome   )Gl( V)( A)( Pg)( Qg)( Qn)( Qm)(Bc  )( Pl)( Ql)( Sh)Are(Vf)M"]
+    L.append(col([(0, "    1"), (6, "L"), (7, "2"), (8, " C"), (10, "GERADOR"),
+                  (24, "1000"), (28, "  0."), (32, f"{pg_barra1:5.0f}")]))
+    L.append(col([(0, "    2"), (6, "L"), (8, " C"), (10, "CARGA"),
+                  (24, "1000"), (28, " -5."), (58, "  87.")]))
+    L += ["99999", "DLIN",
+          "(De )d O d(Pa )NcEPM( R% )( X% )(Mvar)(Tap)(Tmn)(Tmx)(Phs)(Bc  )(Cn)(Ce)Ns(Cq)"]
+    L.append(col([(0, "    1"), (10, "    2"), (15, " 1"), (17, estado_linha),
+                  (26, "   10."), (64, "200."), (68, "240."), (74, "220.")]))
+    L += ["99999", "FIM"]
+    f = tmp_path / "caso.PWF"
+    f.write_bytes("\n".join(L).encode("cp1252"))
+    return str(f)
+
+
+def test_parser_anarede_reguas(tmp_path):
+    """Estado da barra em [6], grupo base em [8:10] e estado do circuito em [17].
+
+    No DBAR o [5] e no DLIN o [7] são o código de OPERAÇÃO de edição do ANAREDE, não o
+    estado — confundir os dois deixa circuito desligado em serviço.
+    """
+    from lincc import PwfModel
+    P = PwfModel(_pwf_sintetico(tmp_path))
+    assert P.bus_kv[1] == pytest.approx(138.0)          # grupo base lido do DGBT
+    assert P.barras[1]["estado"] == "L" and P.barras[1]["V"] == pytest.approx(1.0)
+    assert P.circuito(1, 2, "1")["Ce"] == pytest.approx(240.0)
+    P = PwfModel(_pwf_sintetico(tmp_path, estado_linha="D"))
+    assert P.circuito(1, 2, "1")["estado"] == "D"
+
+
+def test_fluxo_avaliado_das_tensoes_convergidas(tmp_path):
+    """Fluxo por circuito: 5° sobre X = 10% transmitem 100·sen(5°)/0,1 ≈ 87,2 MW."""
+    from lincc import PwfModel
+    from lincc.fluxo import fluxos, carga_maxima
+    P = PwfModel(_pwf_sintetico(tmp_path))
+    f = fluxos(P)[(1, 2, "1")]
+    assert f["P_de_MW"] == pytest.approx(100 * math.sin(math.radians(5)) / 0.1, rel=1e-3)
+    assert f["calculavel"]
+    # carga máxima: o menor entre emergência (240) e equipamento (220)
+    cm = carga_maxima({"c": P}, 1, 2, "1")
+    assert cm["carga_max_A"] == pytest.approx(220e3 / (math.sqrt(3) * 138.0), rel=1e-9)
+    assert "equipamento" in cm["origem"]
+
+
+def test_despacho_retira_fonte_parada(tmp_path):
+    """Gerador com geração nula no cenário sai do caso de curto; com geração, fica."""
+    from lincc import PwfModel
+    from lincc.fluxo import aplicar_despacho
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    barra = M.gens[0]["bus"]
+    parado = PwfModel(_pwf_sintetico(tmp_path, pg_barra1=0.0))
+    if barra == 1:
+        Mc, rel = aplicar_despacho(M, parado)
+        assert rel["sincronos_retirados"] >= 1 and not any(g["bus"] == 1 for g in Mc.gens)
+    gerando = PwfModel(_pwf_sintetico(tmp_path, pg_barra1=100.0))
+    Mc, rel = aplicar_despacho(M, gerando)
+    assert len(Mc.gens) >= 1                         # o caso original não é alterado
+    assert len(M.gens) >= 1

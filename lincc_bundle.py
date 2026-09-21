@@ -420,12 +420,20 @@ class PwfModel:
 
     # Réguas derivadas dos cabeçalhos dos próprios blocos (0-based, fim exclusivo).
     # DBAR: (Num)OETGb(   nome   )Gl( V)( A)( Pg)( Qg)( Qn)( Qm)(Bc  )( Pl)( Ql)( Sh)Are(Vf)M
-    R_DBAR = dict(num=(0, 5), estado=(5, 6), tipo=(6, 7), grupo_base=(8, 9),
+    # Conferido contra o .ANA nas mesmas barras: estado em [6:7] ('L'/'D'), tipo em
+    # [7:8] ('1' PV, '2' referência, branco PQ) e grupo base de tensão em [8:10] — dois
+    # caracteres, como no DGBT. Os grupos principais batem 100% com a tensão do .ANA.
+    R_DBAR = dict(num=(0, 5), estado=(6, 7), tipo=(7, 8), grupo_base=(8, 10),
                   nome=(10, 22), V=(24, 28), A=(28, 32), Pg=(32, 37), Qg=(37, 42),
                   Qn=(42, 47), Qm=(47, 52), Bc=(52, 58), Pl=(58, 63), Ql=(63, 68),
                   Sh=(68, 73), area=(73, 76), Vf=(76, 80))
     # DLIN: (De )d O d(Pa )NcEPM( R% )( X% )(Mvar)(Tap)(Tmn)(Tmx)(Phs)(Bc  )(Cn)(Ce)Ns(Cq)
-    R_DLIN = dict(bf=(0, 5), estado=(7, 8), bt=(10, 15), nc=(15, 17), R=(20, 26),
+    # O cabeçalho é (De )d O d(Pa )NcEPM: o 'O' em [7] é o código de OPERAÇÃO de edição
+    # do ANAREDE (adição, eliminação, modificação), e o ESTADO do circuito é o 'E' em
+    # [17] ('D' desligado). Confundir os dois deixa em serviço circuitos desligados —
+    # chaves de interligação com X de 0,001% entre barras com ângulos diferentes, que
+    # produzem fluxo de milhões de MW. Conferido pelo balanço de potência ativa.
+    R_DLIN = dict(bf=(0, 5), estado=(17, 18), bt=(10, 15), nc=(15, 17), R=(20, 26),
                   X=(26, 32), Mvar=(32, 38), Tap=(38, 43), Tmn=(43, 48), Tmx=(48, 53),
                   Phs=(53, 58), Bc=(58, 64), Cn=(64, 68), Ce=(68, 72), Cq=(74, 78))
     # DGER: (No ) O (Pmn ) (Pmx ) ( Fp) (FpR) (FPn) (Fa) (Fr) (Ag) ( Xq) (Sno) (Est)
@@ -498,10 +506,11 @@ class PwfModel:
         grupos = {}
         for i in bl.get('DGBT', []):
             for ln in self._registros(L, i):
-                g = ln[0:2].strip()
-                v = _num(ln[2:8])
+                g = ln[0:2].strip()            # grupo, dois caracteres
+                v = _num(ln[2:8])              # tensão base, kV
                 if g and v:
                     grupos[g] = v
+        self.grupos_tensao = grupos
         for nb, d in self.barras.items():
             kv = grupos.get(d.get('grupo_base'))
             if kv:
@@ -2593,7 +2602,7 @@ def _faixa(minimo, maximo):
 
 
 def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
-                         modo='completo', curva='MI', norma='IEC'):
+                         modo='completo', curva='MI', norma='IEC', cenarios=None):
     """Faixas admissíveis e viabilidade das funções de sobrecorrente de um equipamento.
 
     NÃO escolhe o ajuste. Para cada função devolve a faixa que os critérios admitem, se ela
@@ -2604,6 +2613,10 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
     relé. `dados`: valores externos em A — carga_max_lt, in_tc, inrush, in_nominal. O que
     faltar é reportado, não estimado; a corrente nominal é lida da base quando o campo MVA
     está preenchido.
+
+    `cenarios`: {nome: PwfModel} com as bases do ANAREDE. Quando fornecido, a carga
+    máxima da linha sai da capacidade de emergência declarada lá, em vez de ser pedida ao
+    usuário — e a origem fica registrada no retorno.
 
     Linha: 51 (pickup e tempo coordenado com a zona 2), 50 (só se seletivo para falta na
     barra remota), SOTF, STUB e 67NT. Transformador: 51 e 50 (acima do inrush e do
@@ -2619,10 +2632,17 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
     bf, bt, nc = int(elemento[0]), int(elemento[1]), str(elemento[2])
     for k, v in da_base(model, bf, bt, nc).items():
         dados.setdefault(k, v)
+    origem_carga = 'informada pelo usuário' if dados.get('carga_max_lt') else None
+    if cenarios and tipo == 'linha' and dados.get('carga_max_lt') in (None, ''):
+        from .fluxo import carga_maxima
+        cm = carga_maxima(cenarios, bf, bt, nc)
+        if cm and cm.get('carga_max_A'):
+            dados['carga_max_lt'] = cm['carga_max_A']
+            origem_carga = 'ANAREDE, ' + cm['origem']
     S = _solver(model, None, modo)
     kA = lambda x: x * 1000.0 if x is not None else None
     out = dict(tipo=tipo, elemento=(bf, bt, nc), modo=modo, curva=_curvas.descreve(curva, norma),
-               criterios=crit, funcoes={}, faltantes=[])
+               criterios=crit, funcoes={}, faltantes=[], origem_carga_max=origem_carga)
 
     def falta(k):
         if dados.get(k) in (None, ''):
@@ -2795,6 +2815,332 @@ def envelope_cenarios(cenarios, funcao):
     if not vals:
         return None
     return {'min': min(vals), 'max': max(vals), 'n': len(vals)}
+
+
+# ====================================================================== #
+#  Fluxo por circuito, avaliado sobre o estado convergido do caso        #
+# ====================================================================== #
+
+SEM_LIMITE = 9999.0     # marcador do ANAREDE para capacidade não declarada
+
+
+def _cap(v):
+    """Capacidade em MVA, ou None quando ausente ou igual ao marcador de 'sem limite'."""
+    if v is None or v <= 0 or v >= SEM_LIMITE:
+        return None
+    return float(v)
+
+
+def fluxos(pwf):
+    """Corrente e potência em cada circuito, nas duas extremidades, a partir do estado
+    convergido do caso.
+
+    Não resolve fluxo de potência: avalia as correntes com as tensões e ângulos que o
+    ANAREDE já convergiu. Linha em modelo π com a susceptância total do circuito; trafo
+    com tap na barra de origem, como é a convenção do ANAREDE.
+
+    Devolve {(bf, bt, nc): dict} com, para cada extremidade, corrente em A, potência
+    aparente em MVA, e o carregamento em relação às três capacidades declaradas.
+    """
+    V = {}
+    for b, d in pwf.barras.items():
+        # Barra desligada tira de serviço os circuitos que chegam nela, mesmo que o
+        # registro do circuito não traga marca de desligado — é o que o ANAREDE faz.
+        if d.get('V') is None or d.get('estado') == 'D':
+            continue
+        ang = np.deg2rad(d.get('A') or 0.0)
+        V[b] = d['V'] * np.exp(1j * ang)
+    saida = {}
+    for c in pwf.circuitos:
+        if c.get('estado') == 'D':
+            continue
+        bf, bt = c['bf'], c['bt']
+        if bf not in V or bt not in V:
+            continue
+        R = (c.get('R') or 0.0) / 100.0
+        X = (c.get('X') or 0.0) / 100.0
+        z = complex(R, X)
+        if abs(z) < 1e-12:
+            continue
+        y = 1.0 / z
+        bsh = (c.get('Mvar') or 0.0) / 100.0            # susceptância total, pu
+        a = c.get('Tap') or 1.0
+        phs = np.deg2rad(c.get('Phs') or 0.0)
+        t = a * np.exp(1j * phs)
+        Vi, Vj = V[bf], V[bt]
+        # tap na barra de origem: Ii = y/|t|²·Vi − y/t*·Vj ;  Ij = −y/t·Vi + y·Vj
+        Ii = y / (abs(t) ** 2) * Vi - y / np.conj(t) * Vj + 1j * bsh / 2 * Vi
+        Ij = -y / t * Vi + y * Vj + 1j * bsh / 2 * Vj
+        Si = Vi * np.conj(Ii) * 100.0
+        Sj = Vj * np.conj(Ij) * 100.0
+        kvf, kvt = pwf.bus_kv.get(bf), pwf.bus_kv.get(bt)
+        caps = {k: _cap(c.get(k)) for k in ('Cn', 'Ce', 'Cq')}
+        s_max = max(abs(Si), abs(Sj))
+        # Incerteza do fluxo pelo arredondamento do arquivo: tensão com 3 casas e ângulo
+        # com ~1 casa (pior caso). Mediana de 2,3% nas linhas de 230 kV e acima no caso de
+        # referência. Em chave de interligação (impedância quase nula) o fluxo não pode ser
+        # obtido das tensões gravadas, e o valor é marcado como não calculável.
+        incerteza = (0.0005 + np.deg2rad(0.05)) / abs(z) * 100.0 if abs(z) else None
+        chave = abs(z) < 0.0005
+        saida[(bf, bt, c['nc'])] = dict(
+            S_de_MVA=abs(Si), S_para_MVA=abs(Sj),
+            P_de_MW=Si.real, Q_de_Mvar=Si.imag,
+            P_para_MW=Sj.real, Q_para_Mvar=Sj.imag,
+            I_de_A=abs(Ii) * 100e3 / (np.sqrt(3) * kvf) if kvf else None,
+            I_para_A=abs(Ij) * 100e3 / (np.sqrt(3) * kvt) if kvt else None,
+            cap_normal_MVA=caps['Cn'], cap_emergencia_MVA=caps['Ce'],
+            cap_equipamento_MVA=caps['Cq'],
+            carregamento_normal=(s_max / caps['Cn']) if caps['Cn'] else None,
+            carregamento_emergencia=(s_max / caps['Ce']) if caps['Ce'] else None,
+            incerteza_MVA=incerteza, calculavel=not chave,
+        )
+    return saida
+
+
+def balanco(pwf, fl=None):
+    """Resíduo do balanço de potência ATIVA em cada barra: Pg − Pl − Σ P saindo, em MW.
+
+    Num caso convergido o resíduo é da ordem da tolerância do ANAREDE. É a verificação de
+    que `fluxos` está certo: se a régua de algum campo estivesse errada, o balanço não
+    fecharia. Usa-se o ativo porque bancos shunt e compensadores estáticos — blocos que
+    este parser não lê — mexem só no reativo.
+
+    Devolve {barra: resíduo_MW}.
+    """
+    fl = fl if fl is not None else fluxos(pwf)
+    sai = {}
+    for (bf, bt, nc), d in fl.items():
+        sai[bf] = sai.get(bf, 0.0) + d['P_de_MW']
+        sai[bt] = sai.get(bt, 0.0) + d['P_para_MW']
+    res = {}
+    for b, d in pwf.barras.items():
+        if d.get('estado') == 'D':
+            continue
+        res[b] = (d.get('Pg') or 0.0) - (d.get('Pl') or 0.0) - sai.get(b, 0.0)
+    return res
+
+
+
+# ====================================================================== #
+#  Despacho do cenário aplicado ao curto-circuito                        #
+# ====================================================================== #
+
+def aplicar_despacho(ana, pwf, saltos=3, sem_correspondencia='manter'):
+    """Cópia do caso de curto-circuito com o despacho de um cenário do ANAREDE.
+
+    O ANAFAS representa a rede sempre completa, com todas as unidades em operação. O
+    ANAREDE traz, por cenário, quais usinas estão gerando. Esta função tira do caso de
+    curto as fontes que o cenário deixa paradas — e só isso: impedâncias, topologia e
+    modelo de cálculo ficam intactos. O motor de curto-circuito não é alterado.
+
+    Critério, fonte a fonte:
+
+      * gerador de conversor (bloco DEOL): casado pelo número da barra; sai se a geração
+        ativa no cenário é nula.
+      * gerador síncrono cuja barra existe no fluxo: idem.
+      * gerador síncrono cuja barra não existe no fluxo — terminais de gerador que o
+        ANAREDE agrega: sobe pela rede, até `saltos` barras, até a primeira que tenha
+        geração declarada no fluxo, e herda o estado dela.
+      * sem correspondência: `sem_correspondencia='manter'` (padrão) mantém o gerador,
+        que é conservador para SUPORTABILIDADE; 'retirar' o tira, que é conservador para
+        SENSIBILIDADE. Os dois juntos dão a faixa de incerteza do mapeamento.
+
+    Devolve (caso_do_cenario, relatorio). O relatório conta o que saiu, o que ficou por
+    decisão e o que ficou por falta de correspondência — é o que o estudo deve declarar.
+    """
+    import copy
+    from collections import deque
+
+    def gera(b):
+        d = pwf.barras.get(b)
+        if d is None or d.get('estado') == 'D':
+            return None
+        return abs(d.get('Pg') or 0.0) > 1e-6
+
+    adj = {}
+    for x in ana.branches:
+        adj.setdefault(x['bf'], []).append(x['bt'])
+        adj.setdefault(x['bt'], []).append(x['bf'])
+
+    def estado_por_topologia(b):
+        vis = {b}
+        q = deque([(b, 0)])
+        while q:
+            u, d = q.popleft()
+            if u != b and u in pwf.barras and pwf.barras[u].get('tipo') in ('1', '2'):
+                return gera(u)
+            if d >= saltos:
+                continue
+            for v in adj.get(u, []):
+                if v not in vis:
+                    vis.add(v)
+                    q.append((v, d + 1))
+        return None
+
+    rel = dict(sincronos_retirados=0, sincronos_mantidos=0, sincronos_sem_correspondencia=0,
+               conversores_retirados=0, conversores_mantidos=0,
+               conversores_sem_correspondencia=0)
+    gens = []
+    for g in ana.gens:
+        b = g['bus']
+        st = gera(b) if b in pwf.barras else estado_por_topologia(b)
+        if st is None:
+            rel['sincronos_sem_correspondencia'] += 1
+            if sem_correspondencia == 'manter':
+                gens.append(g)
+        elif st:
+            rel['sincronos_mantidos'] += 1
+            gens.append(g)
+        else:
+            rel['sincronos_retirados'] += 1
+    deol = {}
+    for b, regs in ana.deol.items():
+        st = gera(b)
+        if st is None:
+            rel['conversores_sem_correspondencia'] += 1
+            if sem_correspondencia == 'manter':
+                deol[b] = regs
+        elif st:
+            rel['conversores_mantidos'] += 1
+            deol[b] = regs
+        else:
+            rel['conversores_retirados'] += 1
+    M = copy.copy(ana)
+    M.gens = gens
+    M.deol = deol
+    M.eol = set(deol)
+    rel['cenario'] = getattr(pwf, 'titulo', '')
+    return M, rel
+
+
+def curto_por_cenario(ana, cenarios, barras, kinds=('3F', '1FT'), modo='completo',
+                      caso_conferido=False):
+    """Corrente de curto-circuito em cada cenário de despacho, com os extremos nomeados.
+
+    `cenarios` é {nome: PwfModel}. Devolve, para cada barra e tipo de defeito, o MÁXIMO e o
+    MÍNIMO entre os cenários, cada um com o nome do cenário em que ocorreu.
+
+    O envelope é conservador nos dois lados. Parte dos geradores síncronos do caso de
+    curto não tem correspondência no fluxo — terminais que o ANAREDE agrega —, e o estado
+    deles no cenário é desconhecido. Por isso cada extremo é calculado sob a hipótese que
+    o torna seguro para o seu uso:
+
+      máximo  (suportabilidade)  com os geradores sem correspondência LIGADOS
+      mínimo  (sensibilidade)    com os geradores sem correspondência DESLIGADOS
+
+    A distância entre as duas hipóteses é a incerteza do mapeamento, e vem no retorno —
+    no caso de referência chega a 8% numa barra de 500 kV.
+
+    `caso_conferido`: se a leitura do .ANA já foi conferida contra o relatório do ANAFAS,
+    os cenários herdam a conferência — são o mesmo arquivo, com fontes retiradas. Os
+    valores por cenário não têm gabarito no ANAFAS, que só calcula a rede completa, e o
+    método fica declarado no retorno.
+    """
+    from .solver import Solver
+
+    def calcular(M):
+        S = Solver(M, modo=modo)
+        S.factor(avisar=False)
+        if modo == 'completo' and S._tem_fc():
+            S.liberar_completo_sem_gabarito(
+                'cenário derivado de caso conferido' if caso_conferido
+                else 'cenário de despacho, leitura não conferida')
+        res = {}
+        for b in barras:
+            for k in kinds:
+                try:
+                    res[(b, k)] = S.fault(b, k) * 1000.0
+                except Exception:
+                    res[(b, k)] = None
+        return res
+
+    saida = {'despacho': {}, 'por_cenario_max': {}, 'por_cenario_min': {}, 'modo': modo,
+             'metodo': ('fontes paradas no cenário do ANAREDE retiradas do caso de '
+                        'curto-circuito; impedâncias e topologia inalteradas; geradores '
+                        'sem correspondência ligados para o máximo e desligados para o '
+                        'mínimo'),
+             'conferido_contra_anafas': False}
+    for nome, pwf in cenarios.items():
+        M_max, rel = aplicar_despacho(ana, pwf, sem_correspondencia='manter')
+        M_min, _ = aplicar_despacho(ana, pwf, sem_correspondencia='retirar')
+        saida['despacho'][nome] = rel
+        saida['por_cenario_max'][nome] = calcular(M_max)
+        saida['por_cenario_min'][nome] = calcular(M_min)
+    extremos = {}
+    for b in barras:
+        for k in kinds:
+            mx = [(r[(b, k)], n) for n, r in saida['por_cenario_max'].items()
+                  if r.get((b, k)) is not None]
+            mn = [(r[(b, k)], n) for n, r in saida['por_cenario_min'].items()
+                  if r.get((b, k)) is not None]
+            if mx and mn:
+                vmax, vmin = max(mx), min(mn)
+                faixa = [abs(saida['por_cenario_max'][n][(b, k)] -
+                              saida['por_cenario_min'][n][(b, k)])
+                         / saida['por_cenario_max'][n][(b, k)] * 100
+                         for n in saida['por_cenario_max']
+                         if saida['por_cenario_max'][n].get((b, k))
+                         and saida['por_cenario_min'][n].get((b, k))]
+                extremos[(b, k)] = {'max': vmax, 'min': vmin,
+                                    'incerteza_mapeamento_pct': max(faixa) if faixa else None}
+    saida['extremos'] = extremos
+    return saida
+
+
+def carga_maxima(cenarios, bf, bt, nc=None):
+    """Carga máxima de um circuito, a partir das bases do ANAREDE.
+
+    Devolve dict em A com as três capacidades declaradas (exatas — não sofrem
+    arredondamento) e o maior fluxo observado entre os cenários, com o nome do cenário.
+
+    `carga_max_A` é o valor que os critérios de proteção usam: o MENOR entre a capacidade
+    de emergência e a de equipamento, quando ambas são declaradas. A proteção não pode
+    atuar com o circuito no limite de emergência — mas o circuito também não carrega além
+    do que o equipamento terminal admite, e quando este é menor, é ele que limita. Sem
+    capacidade de equipamento declarada, vale a de emergência; sem esta, a normal.
+
+    O fluxo observado vem ao lado para comparação — é uma fotografia dos cenários, não um
+    limite.
+    """
+    caps = {}
+    obs = []
+    kv = None
+    for nome, pwf in cenarios.items():
+        c = pwf.circuito(bf, bt, nc)
+        if c is None:
+            continue
+        kv = kv or pwf.bus_kv.get(bf) or pwf.bus_kv.get(bt)
+        for k in ('Cn', 'Ce', 'Cq'):
+            v = _cap(c.get(k))
+            if v:
+                caps[k] = max(caps.get(k, 0), v)
+        fl = fluxos(pwf)
+        f = fl.get((c['bf'], c['bt'], c['nc']))
+        if f and f.get('calculavel'):
+            s = max(f['S_de_MVA'], f['S_para_MVA'])
+            obs.append((s, nome))
+    if not kv:
+        return None
+    a = lambda mva: corrente_nominal(mva, kv) if mva else None
+    if caps.get('Ce') and caps.get('Cq'):
+        ref = min(caps['Ce'], caps['Cq'])
+        origem = ('capacidade de equipamento, menor que a de emergência'
+                  if caps['Cq'] < caps['Ce'] else 'capacidade de emergência')
+    elif caps.get('Ce'):
+        ref, origem = caps['Ce'], 'capacidade de emergência'
+    elif caps.get('Cn'):
+        ref, origem = caps['Cn'], 'capacidade normal'
+    else:
+        ref, origem = None, None
+    out = dict(kv=kv,
+               cap_normal_A=a(caps.get('Cn')), cap_emergencia_A=a(caps.get('Ce')),
+               cap_equipamento_A=a(caps.get('Cq')),
+               carga_max_A=a(ref), origem=origem)
+    if obs:
+        s, nome = max(obs)
+        out['fluxo_max_observado_A'] = a(s)
+        out['cenario_do_fluxo_max'] = nome
+    return out
 
 
 # ===================== curvas de tempo inverso =====================

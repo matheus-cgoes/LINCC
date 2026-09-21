@@ -438,7 +438,7 @@ def _faixa(minimo, maximo):
 
 
 def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
-                         modo='completo', curva='MI', norma='IEC'):
+                         modo='completo', curva='MI', norma='IEC', cenarios=None):
     """Faixas admissíveis e viabilidade das funções de sobrecorrente de um equipamento.
 
     NÃO escolhe o ajuste. Para cada função devolve a faixa que os critérios admitem, se ela
@@ -449,6 +449,10 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
     relé. `dados`: valores externos em A — carga_max_lt, in_tc, inrush, in_nominal. O que
     faltar é reportado, não estimado; a corrente nominal é lida da base quando o campo MVA
     está preenchido.
+
+    `cenarios`: {nome: PwfModel} com as bases do ANAREDE. Quando fornecido, a carga
+    máxima da linha sai da capacidade de emergência declarada lá, em vez de ser pedida ao
+    usuário — e a origem fica registrada no retorno.
 
     Linha: 51 (pickup e tempo coordenado com a zona 2), 50 (só se seletivo para falta na
     barra remota), SOTF, STUB e 67NT. Transformador: 51 e 50 (acima do inrush e do
@@ -464,10 +468,17 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
     bf, bt, nc = int(elemento[0]), int(elemento[1]), str(elemento[2])
     for k, v in da_base(model, bf, bt, nc).items():
         dados.setdefault(k, v)
+    origem_carga = 'informada pelo usuário' if dados.get('carga_max_lt') else None
+    if cenarios and tipo == 'linha' and dados.get('carga_max_lt') in (None, ''):
+        from .fluxo import carga_maxima
+        cm = carga_maxima(cenarios, bf, bt, nc)
+        if cm and cm.get('carga_max_A'):
+            dados['carga_max_lt'] = cm['carga_max_A']
+            origem_carga = 'ANAREDE, ' + cm['origem']
     S = _solver(model, None, modo)
     kA = lambda x: x * 1000.0 if x is not None else None
     out = dict(tipo=tipo, elemento=(bf, bt, nc), modo=modo, curva=_curvas.descreve(curva, norma),
-               criterios=crit, funcoes={}, faltantes=[])
+               criterios=crit, funcoes={}, faltantes=[], origem_carga_max=origem_carga)
 
     def falta(k):
         if dados.get(k) in (None, ''):

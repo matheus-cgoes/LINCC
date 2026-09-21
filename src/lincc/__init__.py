@@ -38,19 +38,36 @@ PROTOCOLO DE TRABALHO — vale para toda chamada, sem precisar ser repetido no p
 
    Nunca escolha em silêncio, e nunca devolva comando para o usuário executar.
 
-3. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
+3. BASES DO ANAREDE (.PWF), quando anexadas. Use-as sem que o usuário precise pedir:
+
+   - Carga máxima dos circuitos: passe os cenários a `ajuste_sobrecorrente(...,
+     cenarios=...)`. A carga sai da capacidade declarada no ANAREDE — o menor entre
+     emergência e equipamento — em vez de ser pedida ao usuário.
+   - Curto-circuito entre cenários: `fluxo.curto_por_cenario(M, cenarios, barras)`. O
+     ANAFAS calcula sempre a rede completa; os cenários retiram as usinas paradas, e o
+     MÍNIMO de curto para sensibilidade costuma cair bem abaixo da rede completa (15% numa
+     barra de 500 kV do caso de referência). O envelope já sai conservador nos dois lados:
+     máximo com os geradores sem correspondência ligados, mínimo com eles desligados.
+   - Antes de usar as duas bases juntas, `conciliar_bases(M, P)` e registre o resultado.
+
+   Declare no relatório que os valores por cenário não têm gabarito no ANAFAS — ele não
+   calcula despacho parcial — e informe a incerteza de mapeamento que o retorno traz.
+   Fluxo por circuito é estimativa: o arquivo grava tensão com 3 casas, e o retorno traz
+   a incerteza de cada valor. As capacidades são exatas.
+
+4. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
    capacidade de interrupção e carga máxima operativa NÃO estão no .ANA. As funções de
    alto nível devolvem `dados_faltantes` com o que falta e o critério que cada item
    bloqueia — reporte a lista em vez de estimar.
 
-4. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
+5. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
    conectadas por conversor; 'sincronas' é o Thévenin puro. Perto dessas usinas a
    diferença passa de 40%. Não misture os dois num mesmo critério.
 
-5. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
+6. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
    primária do TC, não a do equipamento protegido.
 
-6. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
+7. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
    banco de três enrolamentos exige remover TODAS as pernas do nó-estrela; e se o
    equipamento novo já está na base, o cenário "antes" é o contrafactual — remova-o.
 
