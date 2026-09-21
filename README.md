@@ -87,6 +87,10 @@ Submódulo 2.11 exige e a lista do que ainda falta para parametrizar.
 vão, varrendo os quatro tipos de defeito, sistema completo e contingência simples, retirada
 de equipamento e terminal remoto aberto — com o cenário em que cada extremo ocorreu.
 
+**Faixas de ajuste de sobrecorrente**, com a verificação de viabilidade de cada função —
+temporizada, instantânea, fechamento sob falta, proteção de trecho e direcional de terra —
+e o limite que governa. Quando uma função não tem faixa possível, o relatório diz por quê.
+
 **Insumos de ajuste** de proteção: impedâncias e fator de compensação para distância,
 corrente passante para diferencial de transformador, corrente mínima de recomposição para
 diferencial de barra, curvas de tempo inverso IEC e IEEE.

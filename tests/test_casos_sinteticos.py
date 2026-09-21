@@ -511,3 +511,27 @@ def test_leitura_de_relatorio_do_anafas(tmp_path):
         ler_relatorio(str(rel), "secao_inexistente")
     # seção ausente devolve vazio, sem levantar
     assert impedancias_pu(str(rel)) == ({}, {})
+
+
+def test_ajuste_sobrecorrente_devolve_faixas_e_nao_escolhe():
+    """O módulo calcula faixas e viabilidade; escolher dentro delas é decisão de engenharia.
+
+    Também não estima dado ausente: o que falta vai para `faltantes`.
+    """
+    from lincc import ajuste_sobrecorrente
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    r = ajuste_sobrecorrente(M, "linha", (1, 2, "1"))
+    for f in ("51", "50", "SOTF", "STUB", "67NT"):
+        assert f in r["funcoes"]
+    # sem carga máxima nem TC informados, o que depende deles fica em aberto
+    assert {"carga_max_lt", "in_tc"} <= set(r["faltantes"])
+    assert r["funcoes"]["51"]["pickup"] is None
+    # com os dados, o pickup do 51 segue o critério
+    r = ajuste_sobrecorrente(M, "linha", (1, 2, "1"),
+                             dados={"carga_max_lt": 500, "in_tc": 1000})
+    assert r["funcoes"]["51"]["pickup"] == pytest.approx(600.0)     # 120%
+    assert r["funcoes"]["67NT"]["min"] == pytest.approx(100.0)      # 10% de In do TC
+    # critério parametrizável
+    r = ajuste_sobrecorrente(M, "linha", (1, 2, "1"),
+                             dados={"carga_max_lt": 500}, criterios={"f51_carga": 1.5})
+    assert r["funcoes"]["51"]["pickup"] == pytest.approx(750.0)

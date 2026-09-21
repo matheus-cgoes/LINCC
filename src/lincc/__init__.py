@@ -63,6 +63,14 @@ FUNÇÕES DE ALTO NÍVEL — resolvem o estudo inteiro numa chamada
 
     relatorio_curto(M, barra)                 correntes, Thévenin e contribuições
 
+    ajuste_sobrecorrente(M, tipo, elemento)   faixas admissíveis das funções de
+                                              sobrecorrente (51, 50, SOTF, STUB, 67NT na
+                                              linha; 51 e 50 no transformador) e se cada
+                                              uma é viável. NÃO escolhe o ajuste: devolve
+                                              a faixa e o limite que governa. Faixa vazia
+                                              significa função inviável — reporte, com o
+                                              motivo, em vez de propor valor fora dela
+
     relatorio_protecao(M, tipo, elemento)     tipo: 'linha', 'transformador', 'barra',
                                               'reator' ou 'capacitor'. Traz as grandezas
                                               do tipo, N-1, as funções que o Submódulo
@@ -125,7 +133,8 @@ from .parser_anarede import PwfModel, conciliar_bases  # base de fluxo de potên
 from .solver import Solver, branches_at                # motor de curto-circuito
 from .protecao import (recomposicao_87b,               # motor de proteção
                        envelope_contribuicoes, tabela_envelope,
-                       impacto_entrada, relatorio_curto, relatorio_protecao)
+                       impacto_entrada, relatorio_curto, relatorio_protecao,
+                       ajuste_sobrecorrente, CRITERIOS_SOBRECORRENTE)
 
 __version__ = "0.3.0"
 __all__ = [
@@ -137,6 +146,7 @@ __all__ = [
     # motor de proteção
     "recomposicao_87b", "envelope_contribuicoes", "tabela_envelope",
     "impacto_entrada", "relatorio_curto", "relatorio_protecao",
+    "ajuste_sobrecorrente", "CRITERIOS_SOBRECORRENTE",
     # motor de fluxo de potência
     "fluxo",
     # apoio

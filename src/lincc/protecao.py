@@ -405,3 +405,174 @@ def relatorio_protecao(model, tipo, elemento, modo='completo', dados=None,
     out['dados_faltantes'] = falta
     out['dados_faltantes_texto'] = RELATORIO(falta, tipo)
     return out
+
+
+# ====================================================================== #
+#  Sobrecorrente                                                         #
+# ====================================================================== #
+
+# Critérios padrão. Todos parametrizáveis: são convenção de filosofia de proteção, e o
+# usuário pode ter os seus. Nenhum vem do Submódulo 2.11, que não define ajuste.
+CRITERIOS_SOBRECORRENTE = {
+    'linha': dict(
+        f51_carga=1.20,        # pickup do 51: 120% da carga máxima da LT
+        t_z2=0.40,             # tempo da zona 2, s — o 51 deve ser igual ou mais lento
+        f50_margem=1.20,       # 50 só se o pickup superar a falta na barra remota nisso
+        sotf_frac_min=0.80,    # SOTF abaixo de 80% do Icc mínimo remoto
+        stub_frac=0.50,        # STUB até 50% do Icc da barra
+        f67nt_min_in_tc=0.10,  # 67NT: no mínimo 10% de In do TC
+        f67nt_max_1f=0.70,     # 67NT: no máximo 70% da monofásica remota
+    ),
+    'transformador': dict(
+        f51_nominal=1.50,      # pickup do 51: 150% da nominal
+        f50_margem=1.20,       # 50 acima do passa-através e do inrush com essa margem
+    ),
+}
+
+
+def _faixa(minimo, maximo):
+    """Faixa admissível. Viável se o limite inferior não exceder o superior."""
+    if minimo is None or maximo is None:
+        return dict(min=minimo, max=maximo, viavel=None)
+    return dict(min=minimo, max=maximo, viavel=minimo <= maximo)
+
+
+def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
+                         modo='completo', curva='MI', norma='IEC'):
+    """Faixas admissíveis e viabilidade das funções de sobrecorrente de um equipamento.
+
+    NÃO escolhe o ajuste. Para cada função devolve a faixa que os critérios admitem, se ela
+    é viável, qual limite governa, e o que falta para fechá-la. Escolher dentro da faixa é
+    decisão de engenharia.
+
+    `tipo`: 'linha' ou 'transformador'. `elemento`: (bf, bt, nc), com `bf` o terminal do
+    relé. `dados`: valores externos em A — carga_max_lt, in_tc, inrush, in_nominal. O que
+    faltar é reportado, não estimado; a corrente nominal é lida da base quando o campo MVA
+    está preenchido.
+
+    Linha: 51 (pickup e tempo coordenado com a zona 2), 50 (só se seletivo para falta na
+    barra remota), SOTF, STUB e 67NT. Transformador: 51 e 50 (acima do inrush e do
+    passa-através para falta na barra do outro lado, abaixo da falta na barra local).
+
+    Toda corrente em A primários.
+    """
+    from .dados_externos import da_base
+    from . import curvas as _curvas
+    dados = dict(dados or {})
+    crit = dict(CRITERIOS_SOBRECORRENTE.get(tipo, {}))
+    crit.update(criterios or {})
+    bf, bt, nc = int(elemento[0]), int(elemento[1]), str(elemento[2])
+    for k, v in da_base(model, bf, bt, nc).items():
+        dados.setdefault(k, v)
+    S = _solver(model, None, modo)
+    kA = lambda x: x * 1000.0 if x is not None else None
+    out = dict(tipo=tipo, elemento=(bf, bt, nc), modo=modo, curva=_curvas.descreve(curva, norma),
+               criterios=crit, funcoes={}, faltantes=[])
+
+    def falta(k):
+        if dados.get(k) in (None, ''):
+            if k not in out['faltantes']:
+                out['faltantes'].append(k)
+            return True
+        return False
+
+    if tipo == 'linha':
+        # correntes vistas pelo TC do terminal bf
+        def i_ramo(fbus, kind):
+            r = S.branch_current(fbus, bf, bt, nc, kind)
+            return kA(r['Imax']) if r else None
+        i_barra_remota = {k: i_ramo(bt, k) for k in ('3F', '1FT', '2F')}
+        i_barra_local = {k: kA(S.fault(bf, k)) for k in ('3F', '1FT')}
+        i_leo = {k: kA(S.line_end_open(bf, bt, nc, bf, k, p=1.0)) for k in ('3F', '2F', '1FT')}
+
+        # --- 51: pickup pela carga, tempo pelo defeito mais severo ---
+        pk = None if falta('carga_max_lt') else crit['f51_carga'] * float(dados['carga_max_lt'])
+        severo = max(v for v in list(i_barra_remota.values()) + list(i_leo.values()) if v)
+        f51 = dict(pickup=pk, criterio=f"{crit['f51_carga']:.0%} da carga máxima",
+                   i_defeito_mais_severo=severo)
+        if pk:
+            try:
+                f51['tms_minimo'] = _curvas.tms_para_tempo(severo, pk, crit['t_z2'], curva, norma)
+                f51['tempo_no_defeito'] = crit['t_z2']
+            except ValueError as e:
+                f51['aviso'] = str(e)
+        out['funcoes']['51'] = f51
+
+        # --- 50: só se seletivo para falta na barra remota ---
+        i_remota_max = max(v for v in i_barra_remota.values() if v)
+        i_local = i_barra_local['3F']
+        piso = crit['f50_margem'] * i_remota_max
+        f50 = _faixa(piso, i_local)
+        f50.update(criterio=f"acima de {crit['f50_margem']:.0%} da falta na barra remota",
+                   i_barra_remota=i_remota_max, i_barra_local=i_local)
+        if f50['viavel'] is False:
+            f50['conclusao'] = 'não habilitar: sem seletividade para falta na barra remota'
+        out['funcoes']['50'] = f50
+
+        # --- SOTF: acima da nominal, abaixo de 80% do mínimo remoto ---
+        i_min_remoto = min(v for v in (i_barra_remota['2F'], i_barra_remota['1FT']) if v)
+        teto = crit['sotf_frac_min'] * i_min_remoto
+        piso = None if falta('in_lt') else float(dados['in_lt'])
+        fs = _faixa(piso, teto)
+        fs.update(criterio=f"acima da nominal e abaixo de {crit['sotf_frac_min']:.0%} do "
+                           f"mínimo remoto (bifásica ou monofásica)",
+                  i_min_remoto=i_min_remoto)
+        if fs['viavel'] is False:
+            fs['conclusao'] = ('faixa vazia: a nominal supera o limite superior — '
+                               'avaliar unidade 51V')
+        out['funcoes']['SOTF'] = fs
+
+        # --- STUB: até 50% do Icc da barra ---
+        out['funcoes']['STUB'] = dict(max=crit['stub_frac'] * i_local,
+                                      criterio=f"até {crit['stub_frac']:.0%} do Icc da barra",
+                                      i_barra=i_local)
+
+        # --- 67NT: entre 10% de In do TC e 70% da monofásica remota ---
+        teto = crit['f67nt_max_1f'] * i_barra_remota['1FT'] if i_barra_remota['1FT'] else None
+        piso = None if falta('in_tc') else crit['f67nt_min_in_tc'] * float(dados['in_tc'])
+        f67 = _faixa(piso, teto)
+        f67.update(criterio=f"entre {crit['f67nt_min_in_tc']:.0%} de In do TC e "
+                            f"{crit['f67nt_max_1f']:.0%} da monofásica remota",
+                   usual=piso, i_1f_remota=i_barra_remota['1FT'], curva='muito inversa')
+        out['funcoes']['67NT'] = f67
+
+    elif tipo == 'transformador':
+        # --- 51: 150% da nominal ---
+        inom = dados.get('in_nominal')
+        if inom in (None, ''):
+            falta('in_nominal')
+        out['funcoes']['51'] = dict(
+            pickup=crit['f51_nominal'] * float(inom) if inom else None,
+            criterio=f"{crit['f51_nominal']:.0%} da nominal")
+        # --- 50: faixa entre passa-através/inrush e falta local ---
+        # Em banco de três enrolamentos o `bt` do elemento é o nó-estrela fictício
+        # (kV = 0), não uma barra física. A "barra do outro lado" é a do enrolamento de
+        # maior tensão entre as demais pernas do mesmo nó — é nela que a falta passante
+        # deve ser aplicada, com a corrente medida no ramo do terminal do relé.
+        outro = bt
+        if not model.bus_kv.get(bt):
+            pernas = [(x['bt'] if x['bf'] == bt else x['bf']) for x in model.branches
+                      if x['tipo'] == 'T' and bt in (x['bf'], x['bt'])]
+            pernas = [b for b in pernas if b != bf and model.bus_kv.get(b)]
+            if pernas:
+                outro = max(pernas, key=lambda b: model.bus_kv.get(b, 0))
+        out['barra_outro_lado'] = outro
+        try:
+            r = S.branch_current(outro, bf, bt, nc, '3F')
+            passa = r['Imax'] if r else None
+        except Exception:
+            passa = None
+        passa = kA(passa)
+        i_local = kA(S.fault(bf, '3F'))
+        base = [x for x in (passa, None if falta('inrush') else float(dados['inrush'])) if x]
+        piso = crit['f50_margem'] * max(base) if base else None
+        f50 = _faixa(piso, i_local)
+        f50.update(criterio=f"acima de {crit['f50_margem']:.0%} do passa-através e do inrush, "
+                            f"abaixo da falta na barra local",
+                   i_passante_barra_outro_lado=passa, i_barra_local=i_local)
+        if f50['viavel'] is False:
+            f50['conclusao'] = 'faixa vazia: 50 não é seletivo'
+        out['funcoes']['50'] = f50
+    else:
+        raise ValueError("tipo deve ser 'linha' ou 'transformador'")
+    return out
