@@ -349,6 +349,15 @@ def curto_por_cenario(ana, cenarios, barras, kinds=('3F', '1FT'), modo='completo
                 extremos[(b, k)] = {'max': vmax, 'min': vmin,
                                     'incerteza_mapeamento_pct': max(faixa) if faixa else None}
     saida['extremos'] = extremos
+    saida['premissas'] = [
+        'tensão pré-falta de 1,0 pu, sem carregamento prévio',
+        f'modo {modo}',
+        'despacho de cada cenário do ANAREDE aplicado ao caso do ANAFAS: fontes com '
+        'geração nula retiradas; impedâncias e topologia inalteradas',
+        'geradores síncronos fora do fluxo casados subindo até três barras pela rede',
+        'geradores sem correspondência: ligados no máximo, desligados no mínimo',
+        'despacho binário por usina (ligada ou parada), sem número de unidades',
+        'valores por cenário sem gabarito no ANAFAS, que calcula só a rede completa']
     return saida
 
 
@@ -401,4 +410,7 @@ def carga_maxima(cenarios, bf, bt, nc=None):
         s, nome = max(obs)
         out['fluxo_max_observado_A'] = a(s)
         out['cenario_do_fluxo_max'] = nome
+    out['premissas'] = [f'carga máxima: {origem}' if origem else 'carga máxima não declarada',
+                        'capacidades lidas do ANAREDE (exatas); fluxo observado é estimativa '
+                        'sobre tensões gravadas com três casas']
     return out

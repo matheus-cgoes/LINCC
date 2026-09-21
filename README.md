@@ -107,7 +107,9 @@ extremo ocorreu.
 critérios de proteção em vez de ser pedida a você.
 
 Dados que nenhuma base contém — relação de TC, ajuste de relés vizinhos, placa de
-equipamento — são solicitados quando fazem falta, em vez de estimados.
+equipamento — são solicitados quando fazem falta, em vez de estimados. E todo resultado vem
+acompanhado das premissas que o produziram: critérios de ajuste, origem de cada dado,
+hipóteses de cálculo.
 
 ---
 

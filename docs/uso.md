@@ -278,6 +278,14 @@ correspondência entram ligados no máximo e desligados no mínimo, e a distânc
 duas hipóteses vem como `incerteza_mapeamento_pct`. Os valores por cenário não têm gabarito
 no ANAFAS, que só calcula a rede completa.
 
+## Premissas declaradas
+
+Toda função de alto nível — `impacto_entrada`, `relatorio_curto`, `relatorio_protecao`,
+`ajuste_sobrecorrente`, `carga_maxima`, `curto_por_cenario` — devolve `premissas`: o que foi
+assumido no cálculo (modo, tensão pré-falta, conferência do caso, critérios de ajuste,
+origem de cada dado, hipóteses de despacho). O protocolo do agente exige apresentá-las ao
+usuário junto com os números.
+
 ## Limitações conhecidas
 
 ### Do modo completo

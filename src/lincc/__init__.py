@@ -56,19 +56,25 @@ PROTOCOLO DE TRABALHO — vale para toda chamada, sem precisar ser repetido no p
    Fluxo por circuito é estimativa: o arquivo grava tensão com 3 casas, e o retorno traz
    a incerteza de cada valor. As capacidades são exatas.
 
-4. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
+4. DECLARE TODAS AS PREMISSAS. Toda função de alto nível devolve `premissas`: a lista do
+   que foi assumido no cálculo — modo, tensão pré-falta, critérios de ajuste, origem da
+   carga, hipóteses de despacho. Apresente-a ao usuário, sempre que a função for usada,
+   em linguagem de engenharia. Nenhum número deve chegar ao usuário sem as premissas que
+   o produziram.
+
+5. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
    capacidade de interrupção e carga máxima operativa NÃO estão no .ANA. As funções de
    alto nível devolvem `dados_faltantes` com o que falta e o critério que cada item
    bloqueia — reporte a lista em vez de estimar.
 
-5. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
+6. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
    conectadas por conversor; 'sincronas' é o Thévenin puro. Perto dessas usinas a
    diferença passa de 40%. Não misture os dois num mesmo critério.
 
-6. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
+7. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
    primária do TC, não a do equipamento protegido.
 
-7. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
+8. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
    banco de três enrolamentos exige remover TODAS as pernas do nó-estrela; e se o
    equipamento novo já está na base, o cenário "antes" é o contrafactual — remova-o.
 

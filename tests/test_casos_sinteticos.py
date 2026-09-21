@@ -616,3 +616,23 @@ def test_piso_do_sotf_e_a_carga_de_emergencia():
                              dados={"carga_max_lt": 500.0, "in_lt": 300.0})
     assert r["funcoes"]["SOTF"]["min"] == pytest.approx(500.0)
     assert r["funcoes"]["SOTF"]["base_do_piso"] == "carga de emergência"
+
+
+def test_toda_funcao_de_alto_nivel_declara_premissas():
+    """Nenhum número chega ao usuário sem as premissas que o produziram."""
+    from lincc import (impacto_entrada, relatorio_curto, relatorio_protecao,
+                       ajuste_sobrecorrente)
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    retornos = [impacto_entrada(M, [(1, 2, "1")], kv_min=1.0),
+                relatorio_curto(M, 2),
+                relatorio_protecao(M, "barra", 2),
+                relatorio_protecao(M, "linha", (1, 2, "1"), n1=False),
+                ajuste_sobrecorrente(M, "linha", (1, 2, "1"), dados={"carga_max_lt": 500})]
+    for r in retornos:
+        assert r.get("premissas"), "retorno sem premissas"
+        assert any("pré-falta" in p for p in r["premissas"])
+    # o 51 de transformador declara que a referência é a nominal, não a emergência
+    trafo = next(b for b in M.branches if b["tipo"] == "T")
+    r = ajuste_sobrecorrente(M, "transformador", (trafo["bf"], trafo["bt"], trafo["nc"]),
+                             dados={"in_nominal": 100.0})
+    assert any("NOMINAL" in p and "emergência" in p for p in r["premissas"])

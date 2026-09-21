@@ -191,6 +191,22 @@ def tabela_envelope(env, model=None, largura=46):
 _KINDS = ('3F', '1FT', '2F', '2FT')
 
 
+def _premissas_curto(S):
+    """Premissas presentes em todo cálculo de curto-circuito desta instância."""
+    sel = S.selo_completo() if hasattr(S, 'selo_completo') else {}
+    p = ['tensão pré-falta de 1,0 pu em todas as barras, sem carregamento prévio',
+         'correntes em kA primários (A primários nos ajustes)']
+    if S.modo == 'completo' and S._tem_fc():
+        p.append('modo completo: inclui a contribuição dos geradores conectados por '
+                 'conversor, conforme a curva do Submódulo 2.10')
+        p.append('leitura do caso conferida contra o relatório do ANAFAS'
+                 if sel.get('conferido_no_caso') else
+                 'leitura do caso NÃO conferida contra o relatório do ANAFAS')
+    else:
+        p.append('modo síncronas: Thévenin sem a contribuição dos geradores de conversor')
+    return p
+
+
 def _solver(model, drop=None, modo='completo'):
     # avisar=False: numa chamada de alto nível o aviso apareceria uma vez por cenário
     # interno — o relatório declara o modo no retorno, que é onde interessa.
@@ -243,8 +259,15 @@ def impacto_entrada(model, ramos, limiar=10.0, kinds=_KINDS, kv_min=69.0,
                               antes=pior[2], depois=pior[3], variacao_pct=pior[0],
                               kind=pior[1]))
     saida.sort(key=lambda d: -abs(d['variacao_pct']))
+    prem = _premissas_curto(S_com) + [
+        'cenário "antes" obtido retirando o equipamento do caso (contrafactual)',
+        f"tipos de defeito avaliados: {', '.join(kinds)}; reportado o que governou",
+        f"barras de {kv_min:g} kV para cima; ignoradas as com corrente abaixo de "
+        f"{i_min_kA:g} kA, onde o percentual não tem significado",
+        f"gatilho de revisão: variação de {limiar:g}%",
+        'rede completa do ANAFAS, sem despacho de cenário']
     return dict(barras=saida, limiar=limiar, modo=modo, n_avaliadas=len(alvo),
-                ramos=ramos)
+                ramos=ramos, premissas=prem)
 
 
 def relatorio_curto(model, barra, kinds=_KINDS, modo='completo', solver=None):
@@ -268,6 +291,7 @@ def relatorio_curto(model, barra, kinds=_KINDS, modo='completo', solver=None):
         out['contribuicoes'] = S.contribution(barra, '3F', modo=modo)
     except Exception:
         out['contribuicoes'] = {}
+    out['premissas'] = _premissas_curto(S) + ['rede completa do ANAFAS, sem despacho de cenário']
     return out
 
 
@@ -404,6 +428,18 @@ def relatorio_protecao(model, tipo, elemento, modo='completo', dados=None,
                       if tipo in ('linha', 'transformador', 'capacitor') else None)
     out['dados_faltantes'] = falta
     out['dados_faltantes_texto'] = RELATORIO(falta, tipo)
+    prem = _premissas_curto(S) + ['rede completa do ANAFAS, sem despacho de cenário']
+    if n1 and tipo in ('linha', 'transformador', 'capacitor'):
+        prem.append('contingência N-1: retirada de cada elemento incidente no terminal local')
+    if tipo == 'barra':
+        prem.append('envelope por vão: quatro tipos de defeito, rede completa e N-1 até uma '
+                    'barra vizinha, retirada de equipamento e terminal remoto aberto')
+    if tipo == 'linha':
+        prem.append('terminal remoto aberto: para posições intermediárias, o efeito dos '
+                    'conversores é aplicado pela razão medida no terminal')
+    prem.append('funções exigidas conforme o Submódulo 2.11; critérios de ajuste não '
+                'aplicados — o relatório traz insumos, não ajustes')
+    out['premissas'] = prem
     return out
 
 
@@ -466,8 +502,12 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
     crit = dict(CRITERIOS_SOBRECORRENTE.get(tipo, {}))
     crit.update(criterios or {})
     bf, bt, nc = int(elemento[0]), int(elemento[1]), str(elemento[2])
+    informados = {k for k, v in dados.items() if v not in (None, '')}
+    da_caso = set()
     for k, v in da_base(model, bf, bt, nc).items():
-        dados.setdefault(k, v)
+        if k not in dados or dados[k] in (None, ''):
+            dados[k] = v
+            da_caso.add(k)
     origem_carga = 'informada pelo usuário' if dados.get('carga_max_lt') else None
     if cenarios and tipo == 'linha' and dados.get('carga_max_lt') in (None, ''):
         from .fluxo import carga_maxima
@@ -479,6 +519,15 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
     kA = lambda x: x * 1000.0 if x is not None else None
     out = dict(tipo=tipo, elemento=(bf, bt, nc), modo=modo, curva=_curvas.descreve(curva, norma),
                criterios=crit, funcoes={}, faltantes=[], origem_carga_max=origem_carga)
+    prem = _premissas_curto(S)
+    prem.append(f"curva de tempo inverso: {_curvas.descreve(curva, norma)}")
+    if origem_carga:
+        prem.append(f"carga máxima da linha: {origem_carga}")
+    if da_caso & {'in_nominal', 'in_lt'}:
+        prem.append('corrente nominal obtida do campo MVA do caso .ANA')
+    if informados:
+        prem.append('dados informados pelo usuário: ' + ', '.join(sorted(informados)))
+    out['premissas'] = prem
 
     def falta(k):
         if dados.get(k) in (None, ''):
@@ -501,6 +550,16 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
         severo = max(v for v in list(i_barra_remota.values()) + list(i_leo.values()) if v)
         f51 = dict(pickup=pk, criterio=f"{crit['f51_carga']:.0%} da carga máxima",
                    i_defeito_mais_severo=severo)
+        prem.append(f"51 de linha: pickup em {crit['f51_carga']:.0%} da carga de emergência; "
+                    f"tempo de {crit['t_z2']*1000:.0f} ms (zona 2) no defeito mais severo, "
+                    f"entre falta na barra remota e terminal remoto aberto")
+        prem.append(f"50 de linha: habilitado só se o pickup superar em "
+                    f"{crit['f50_margem']-1:.0%} a falta na barra remota")
+        prem.append(f"SOTF: acima da carga de emergência e abaixo de "
+                    f"{crit['sotf_frac_min']:.0%} do curto mínimo remoto; STUB até "
+                    f"{crit['stub_frac']:.0%} do curto da barra; 67NT entre "
+                    f"{crit['f67nt_min_in_tc']:.0%} de In do TC e "
+                    f"{crit['f67nt_max_1f']:.0%} da monofásica remota")
         if pk:
             try:
                 f51['tms_minimo'] = _curvas.tms_para_tempo(severo, pk, crit['t_z2'], curva, norma)
@@ -564,6 +623,13 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
         out['funcoes']['51'] = dict(
             pickup=crit['f51_nominal'] * float(inom) if inom else None,
             criterio=f"{crit['f51_nominal']:.0%} da nominal")
+        prem.append(f"51 de transformador: pickup em {crit['f51_nominal']:.0%} da corrente "
+                    f"NOMINAL, não referido à capacidade de emergência — se esta superar "
+                    f"o pickup, a proteção pode atuar em regime de emergência")
+        prem.append(f"50 de transformador: acima de {crit['f50_margem']:.0%} do maior entre "
+                    f"o passa-através para falta na barra do outro lado e o inrush, e "
+                    f"abaixo da falta na barra local; banco de três enrolamentos com a "
+                    f"barra do outro lado localizada pelo nó-estrela")
         # --- 50: faixa entre passa-através/inrush e falta local ---
         # Em banco de três enrolamentos o `bt` do elemento é o nó-estrela fictício
         # (kV = 0), não uma barra física. A "barra do outro lado" é a do enrolamento de
