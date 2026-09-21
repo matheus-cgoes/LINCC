@@ -41,8 +41,9 @@ PROTOCOLO DE TRABALHO — vale para toda chamada, sem precisar ser repetido no p
 3. BASES DO ANAREDE (.PWF), quando anexadas. Use-as sem que o usuário precise pedir:
 
    - Carga máxima dos circuitos: passe os cenários a `ajuste_sobrecorrente(...,
-     cenarios=...)`. A carga sai da capacidade declarada no ANAREDE — o menor entre
-     emergência e equipamento — em vez de ser pedida ao usuário.
+     cenarios=...)`. A carga sai da capacidade de EMERGÊNCIA declarada no ANAREDE, em vez
+     de ser pedida ao usuário. Todo pickup que dependa de carga fica acima desse limite:
+     em regime de emergência o equipamento não pode ser desligado pela proteção.
    - Curto-circuito entre cenários: `fluxo.curto_por_cenario(M, cenarios, barras)`. O
      ANAFAS calcula sempre a rede completa; os cenários retiram as usinas paradas, e o
      MÍNIMO de curto para sensibilidade costuma cair bem abaixo da rede completa (15% numa

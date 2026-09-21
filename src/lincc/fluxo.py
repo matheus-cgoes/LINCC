@@ -358,11 +358,11 @@ def carga_maxima(cenarios, bf, bt, nc=None):
     Devolve dict em A com as três capacidades declaradas (exatas — não sofrem
     arredondamento) e o maior fluxo observado entre os cenários, com o nome do cenário.
 
-    `carga_max_A` é o valor que os critérios de proteção usam: o MENOR entre a capacidade
-    de emergência e a de equipamento, quando ambas são declaradas. A proteção não pode
-    atuar com o circuito no limite de emergência — mas o circuito também não carrega além
-    do que o equipamento terminal admite, e quando este é menor, é ele que limita. Sem
-    capacidade de equipamento declarada, vale a de emergência; sem esta, a normal.
+    `carga_max_A` é o valor que os critérios de proteção usam: a capacidade de
+    EMERGÊNCIA, e na falta dela a normal. Em regime de emergência o equipamento não pode
+    ser desligado indevidamente pela proteção, então todo pickup que dependa de carga
+    precisa ficar acima desse limite. A capacidade normal é sempre menor que a de
+    emergência e não serve como referência de pickup.
 
     O fluxo observado vem ao lado para comparação — é uma fotografia dos cenários, não um
     limite.
@@ -387,14 +387,10 @@ def carga_maxima(cenarios, bf, bt, nc=None):
     if not kv:
         return None
     a = lambda mva: corrente_nominal(mva, kv) if mva else None
-    if caps.get('Ce') and caps.get('Cq'):
-        ref = min(caps['Ce'], caps['Cq'])
-        origem = ('capacidade de equipamento, menor que a de emergência'
-                  if caps['Cq'] < caps['Ce'] else 'capacidade de emergência')
-    elif caps.get('Ce'):
+    if caps.get('Ce'):
         ref, origem = caps['Ce'], 'capacidade de emergência'
     elif caps.get('Cn'):
-        ref, origem = caps['Cn'], 'capacidade normal'
+        ref, origem = caps['Cn'], 'capacidade normal (emergência não declarada)'
     else:
         ref, origem = None, None
     out = dict(kv=kv,

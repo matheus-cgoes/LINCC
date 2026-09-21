@@ -586,10 +586,10 @@ def test_fluxo_avaliado_das_tensoes_convergidas(tmp_path):
     f = fluxos(P)[(1, 2, "1")]
     assert f["P_de_MW"] == pytest.approx(100 * math.sin(math.radians(5)) / 0.1, rel=1e-3)
     assert f["calculavel"]
-    # carga máxima: o menor entre emergência (240) e equipamento (220)
+    # carga máxima: capacidade de emergência (240 MVA), acima da normal (200)
     cm = carga_maxima({"c": P}, 1, 2, "1")
-    assert cm["carga_max_A"] == pytest.approx(220e3 / (math.sqrt(3) * 138.0), rel=1e-9)
-    assert "equipamento" in cm["origem"]
+    assert cm["carga_max_A"] == pytest.approx(240e3 / (math.sqrt(3) * 138.0), rel=1e-9)
+    assert "emergência" in cm["origem"]
 
 
 def test_despacho_retira_fonte_parada(tmp_path):
@@ -606,3 +606,13 @@ def test_despacho_retira_fonte_parada(tmp_path):
     Mc, rel = aplicar_despacho(M, gerando)
     assert len(Mc.gens) >= 1                         # o caso original não é alterado
     assert len(M.gens) >= 1
+
+
+def test_piso_do_sotf_e_a_carga_de_emergencia():
+    """Pickup que depende de carga fica acima da carga de emergência."""
+    from lincc import ajuste_sobrecorrente
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    r = ajuste_sobrecorrente(M, "linha", (1, 2, "1"),
+                             dados={"carga_max_lt": 500.0, "in_lt": 300.0})
+    assert r["funcoes"]["SOTF"]["min"] == pytest.approx(500.0)
+    assert r["funcoes"]["SOTF"]["base_do_piso"] == "carga de emergência"

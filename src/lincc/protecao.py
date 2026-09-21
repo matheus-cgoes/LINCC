@@ -415,7 +415,7 @@ def relatorio_protecao(model, tipo, elemento, modo='completo', dados=None,
 # usuário pode ter os seus. Nenhum vem do Submódulo 2.11, que não define ajuste.
 CRITERIOS_SOBRECORRENTE = {
     'linha': dict(
-        f51_carga=1.20,        # pickup do 51: 120% da carga máxima da LT
+        f51_carga=1.20,        # pickup do 51: 120% da carga de EMERGÊNCIA da LT
         t_z2=0.40,             # tempo da zona 2, s — o 51 deve ser igual ou mais lento
         f50_margem=1.20,       # 50 só se o pickup superar a falta na barra remota nisso
         sotf_frac_min=0.80,    # SOTF abaixo de 80% do Icc mínimo remoto
@@ -520,16 +520,25 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
             f50['conclusao'] = 'não habilitar: sem seletividade para falta na barra remota'
         out['funcoes']['50'] = f50
 
-        # --- SOTF: acima da nominal, abaixo de 80% do mínimo remoto ---
+        # --- SOTF: acima da carga de emergência, abaixo de 80% do mínimo remoto ---
+        # O piso é a carga máxima (emergência): a função não pode atuar com a linha
+        # energizada e carregada no limite de emergência. Sem ela, usa-se a nominal e o
+        # retorno registra que o piso é provisório.
         i_min_remoto = min(v for v in (i_barra_remota['2F'], i_barra_remota['1FT']) if v)
         teto = crit['sotf_frac_min'] * i_min_remoto
-        piso = None if falta('in_lt') else float(dados['in_lt'])
+        if dados.get('carga_max_lt') not in (None, ''):
+            piso, base_piso = float(dados['carga_max_lt']), 'carga de emergência'
+        elif not falta('in_lt'):
+            piso, base_piso = float(dados['in_lt']), 'corrente nominal (provisório)'
+        else:
+            piso, base_piso = None, None
         fs = _faixa(piso, teto)
-        fs.update(criterio=f"acima da nominal e abaixo de {crit['sotf_frac_min']:.0%} do "
-                           f"mínimo remoto (bifásica ou monofásica)",
-                  i_min_remoto=i_min_remoto)
+        fs.update(criterio=f"acima da carga de emergência e abaixo de "
+                           f"{crit['sotf_frac_min']:.0%} do mínimo remoto (bifásica ou "
+                           f"monofásica)",
+                  i_min_remoto=i_min_remoto, base_do_piso=base_piso)
         if fs['viavel'] is False:
-            fs['conclusao'] = ('faixa vazia: a nominal supera o limite superior — '
+            fs['conclusao'] = ('faixa vazia: a carga supera o limite superior — '
                                'avaliar unidade 51V')
         out['funcoes']['SOTF'] = fs
 

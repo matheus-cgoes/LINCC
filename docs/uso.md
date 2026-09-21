@@ -267,8 +267,9 @@ linhas de 230 kV e acima, e vem em `incerteza_MVA`. Em chave de interligação (
 quase nula) o fluxo não pode ser obtido das tensões e é marcado `calculavel=False`.
 Capacitores série controlados (`DCSC`) e conversoras de elo CC não são lidos.
 
-**Carga máxima** é o menor entre a capacidade de emergência e a de equipamento, quando ambas
-existem: o circuito não carrega além do que o equipamento terminal admite.
+**Carga máxima** é a capacidade de emergência (na falta dela, a normal). Todo pickup que
+dependa de carga — 51, SOTF — fica acima desse limite, porque em regime de emergência o
+equipamento não pode ser desligado indevidamente pela proteção.
 
 **Despacho.** Fonte com geração nula no cenário é retirada do caso de curto; impedâncias e
 topologia ficam intactas. Conversores casam direto pelo número (95%). Geradores síncronos
