@@ -616,7 +616,8 @@ def conciliar_bases(ana, pwf):
 class Solver:
     def __init__(self, model, drop_branches=None, drop_gens=None, block_btb=True,
                  dispatch_file=None,   # despacho inferido OBSOLETO: estados do DBAR ('d') cobrem o caso
-                 charging=False, modo='completo', manter_reatores=None):
+                 charging=False, modo='completo', manter_reatores=None,
+                 drop_reatores_barra=None):
         """`charging`: representar a capacitância de linha (campos S1 e S0), em π.
 
         PADRÃO DESLIGADO, e a razão é medida. O relatório de impedâncias de barra do
@@ -639,6 +640,9 @@ class Solver:
         # `manter_reatores`: linha pendurada no terminal fechado (terminal remoto aberto),
         # que continua conectada com os seus reatores.
         self.manterShl = {(a, b, str(c)) for a, b, c in (manter_reatores or [])}
+        # Barras cujos reatores de barra estão desligados no cenário — o reator é um vão
+        # da subestação e sai, por exemplo, na recomposição por um só elemento.
+        self.dropH = set(drop_reatores_barra or [])
         if modo not in ('sincronas', 'completo'):
             raise ValueError(f"modo deve ser 'sincronas' ou 'completo', recebido {modo!r}")
         # Modo global da instância: toda grandeza calculada por este Solver segue este
@@ -873,7 +877,7 @@ class Solver:
         # RN/XN do lado do equipamento não é somado novamente (validado A/B vs ANAFAS).
         for h in M.shunts:
             b=h['bus']
-            if b not in IDX0: continue
+            if b not in IDX0 or b in self.dropH: continue
             if self.conn_type(h['conn'])!='YN': continue
             x=(h['X0'] or 0)/100
             r=(h.get('R0') or 0)/100
@@ -2203,7 +2207,10 @@ def recomposicao_87b(model, bus, kinds=('3F','1FT'), modo='completo'):
     tab=[]; mins={k:float('inf') for k in kinds}
     for keep in inc:
         drop=[b for b in inc if b!=keep]
-        S=Solver(model, drop_branches=drop, modo=modo); S.factor(avisar=False)
+        # Energização por um só elemento: o reator de barra também é um vão e sai. É a
+        # hipótese de menor corrente, e a que reproduz o ANAFAS na recomposição.
+        S=Solver(model, drop_branches=drop, modo=modo, drop_reatores_barra=[bus])
+        S.factor(avisar=False)
         if modo=='completo':
             # A recomposição monta dezenas de cenários; cada um é um Solver novo, e o
             # bloqueio do modo completo é por instância. Propaga-se a liberação, porque a
@@ -2607,6 +2614,8 @@ def relatorio_protecao(model, tipo, elemento, modo='completo', dados=None,
     if n1 and tipo in ('linha', 'transformador', 'capacitor'):
         prem.append('contingência N-1: retirada de cada elemento incidente no terminal local')
     if tipo == 'barra':
+        prem.append('recomposição: barra energizada por um só elemento de cada vez, com as '
+                    'demais conexões e o reator de barra desligados')
         prem.append('envelope por vão: quatro tipos de defeito, rede completa e N-1 até uma '
                     'barra vizinha, retirada de equipamento e terminal remoto aberto')
     if tipo == 'linha':

@@ -24,7 +24,8 @@ from ._base import num, zfin, zn3
 class Solver:
     def __init__(self, model, drop_branches=None, drop_gens=None, block_btb=True,
                  dispatch_file=None,   # despacho inferido OBSOLETO: estados do DBAR ('d') cobrem o caso
-                 charging=False, modo='completo', manter_reatores=None):
+                 charging=False, modo='completo', manter_reatores=None,
+                 drop_reatores_barra=None):
         """`charging`: representar a capacitância de linha (campos S1 e S0), em π.
 
         PADRÃO DESLIGADO, e a razão é medida. O relatório de impedâncias de barra do
@@ -47,6 +48,9 @@ class Solver:
         # `manter_reatores`: linha pendurada no terminal fechado (terminal remoto aberto),
         # que continua conectada com os seus reatores.
         self.manterShl = {(a, b, str(c)) for a, b, c in (manter_reatores or [])}
+        # Barras cujos reatores de barra estão desligados no cenário — o reator é um vão
+        # da subestação e sai, por exemplo, na recomposição por um só elemento.
+        self.dropH = set(drop_reatores_barra or [])
         if modo not in ('sincronas', 'completo'):
             raise ValueError(f"modo deve ser 'sincronas' ou 'completo', recebido {modo!r}")
         # Modo global da instância: toda grandeza calculada por este Solver segue este
@@ -281,7 +285,7 @@ class Solver:
         # RN/XN do lado do equipamento não é somado novamente (validado A/B vs ANAFAS).
         for h in M.shunts:
             b=h['bus']
-            if b not in IDX0: continue
+            if b not in IDX0 or b in self.dropH: continue
             if self.conn_type(h['conn'])!='YN': continue
             x=(h['X0'] or 0)/100
             r=(h.get('R0') or 0)/100

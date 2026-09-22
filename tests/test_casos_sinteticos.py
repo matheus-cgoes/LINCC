@@ -652,3 +652,15 @@ def test_reator_de_linha_sai_com_a_linha():
     fica = Solver(M, drop_branches=[(1, 2, "1")], modo="sincronas",
                   manter_reatores=[(1, 2, "1")]); fica.factor(avisar=False)
     assert fica.fault(1, "1FT") != pytest.approx(sem.fault(1, "1FT"), rel=1e-6)
+
+
+def test_reator_de_barra_pode_ser_desligado():
+    """Reator de barra é um vão: sai na recomposição por um só elemento."""
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    M.shunts.append(dict(bus=2, conn="YN", X0=50.0, R0=None, Q=-100.0, nunop=1))
+    com = Solver(M, modo="sincronas"); com.factor(avisar=False)
+    sem = Solver(M, modo="sincronas", drop_reatores_barra=[2]); sem.factor(avisar=False)
+    base = Solver(AnaModel(str(CASES / "caso1_radial.ANA")), modo="sincronas")
+    base.factor(avisar=False)
+    assert sem.fault(2, "1FT") == pytest.approx(base.fault(2, "1FT"), rel=1e-12)
+    assert com.fault(2, "1FT") > sem.fault(2, "1FT")      # reator aterrado eleva a 1FT

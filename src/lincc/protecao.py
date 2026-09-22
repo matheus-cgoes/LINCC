@@ -28,7 +28,10 @@ def recomposicao_87b(model, bus, kinds=('3F','1FT'), modo='completo'):
     tab=[]; mins={k:float('inf') for k in kinds}
     for keep in inc:
         drop=[b for b in inc if b!=keep]
-        S=Solver(model, drop_branches=drop, modo=modo); S.factor(avisar=False)
+        # Energização por um só elemento: o reator de barra também é um vão e sai. É a
+        # hipótese de menor corrente, e a que reproduz o ANAFAS na recomposição.
+        S=Solver(model, drop_branches=drop, modo=modo, drop_reatores_barra=[bus])
+        S.factor(avisar=False)
         if modo=='completo':
             # A recomposição monta dezenas de cenários; cada um é um Solver novo, e o
             # bloqueio do modo completo é por instância. Propaga-se a liberação, porque a
@@ -432,6 +435,8 @@ def relatorio_protecao(model, tipo, elemento, modo='completo', dados=None,
     if n1 and tipo in ('linha', 'transformador', 'capacitor'):
         prem.append('contingência N-1: retirada de cada elemento incidente no terminal local')
     if tipo == 'barra':
+        prem.append('recomposição: barra energizada por um só elemento de cada vez, com as '
+                    'demais conexões e o reator de barra desligados')
         prem.append('envelope por vão: quatro tipos de defeito, rede completa e N-1 até uma '
                     'barra vizinha, retirada de equipamento e terminal remoto aberto')
     if tipo == 'linha':
