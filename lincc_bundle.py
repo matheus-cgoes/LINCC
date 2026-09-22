@@ -261,7 +261,8 @@ class AnaModel:
                 nn = ln[47:57].split() if len(ln) > 47 else []
                 try: nunop = int(nn[-1]) if nn else 1  # unidades operativas
                 except: nunop = 1
-                self.shl.append(dict(bf=bf,bt=bt,term=term,Q=q,conn='YN',
+                nc = ln[12:16].strip() or '1'           # circuito da linha do reator
+                self.shl.append(dict(bf=bf,bt=bt,nc=nc,term=term,Q=q,conn='YN',
                                      rn=rn,xn=xn,nunop=nunop))
         # DEOL — geradores síncronos com conversor pleno: fontes de corrente de sequência
         # positiva, NÃO entram na Ybus. Régua conforme manual do ANAFAS, apêndice A33-A34.
@@ -615,7 +616,7 @@ def conciliar_bases(ana, pwf):
 class Solver:
     def __init__(self, model, drop_branches=None, drop_gens=None, block_btb=True,
                  dispatch_file=None,   # despacho inferido OBSOLETO: estados do DBAR ('d') cobrem o caso
-                 charging=False, modo='completo'):
+                 charging=False, modo='completo', manter_reatores=None):
         """`charging`: representar a capacitância de linha (campos S1 e S0), em π.
 
         PADRÃO DESLIGADO, e a razão é medida. O relatório de impedâncias de barra do
@@ -633,6 +634,11 @@ class Solver:
         """
         self.M = model
         self.charging = bool(charging)
+        # Reator de linha sai junto com a linha retirada: com a linha aberta nos dois
+        # terminais, o reator deixa de ser caminho para a terra na barra. Exceção em
+        # `manter_reatores`: linha pendurada no terminal fechado (terminal remoto aberto),
+        # que continua conectada com os seus reatores.
+        self.manterShl = {(a, b, str(c)) for a, b, c in (manter_reatores or [])}
         if modo not in ('sincronas', 'completo'):
             raise ValueError(f"modo deve ser 'sincronas' ou 'completo', recebido {modo!r}")
         # Modo global da instância: toda grandeza calculada por este Solver segue este
@@ -890,6 +896,10 @@ class Solver:
         for s in M.shl:
             b=s['bf'] if s['term']=='D' else s['bt']
             if b not in IDX0 or not s['Q']: continue
+            k=(s['bf'], s['bt'], str(s.get('nc','1'))); kr=(k[1], k[0], k[2])
+            if (k in self.dropB or kr in self.dropB) and not (
+                    k in self.manterShl or kr in self.manterShl):
+                continue                              # linha retirada: reator sai junto
             if self.conn_type(s['conn'])!='YN': continue
             zn=zn3(s.get('rn'), s.get('xn'))
             if zn is None: continue                   # neutro isolado
@@ -1748,7 +1758,8 @@ class Solver:
         p = min(max(float(p), 0.0), 1.0)
         drop = list(self.dropB) + [(br['bf'], br['bt'], br['nc'])]
         modo = self._modo(modo)
-        S2 = Solver(self.M, drop_branches=drop, charging=self.charging, modo=modo)
+        S2 = Solver(self.M, drop_branches=drop, charging=self.charging, modo=modo,
+                    manter_reatores=[(br['bf'], br['bt'], br['nc'])])
         S2.factor(avisar=False)
         if modo == 'completo' and S2._tem_fc():
             # A liberação vem de quem chamou: este é um cenário derivado do mesmo caso.

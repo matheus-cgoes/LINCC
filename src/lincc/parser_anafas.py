@@ -209,7 +209,8 @@ class AnaModel:
                 nn = ln[47:57].split() if len(ln) > 47 else []
                 try: nunop = int(nn[-1]) if nn else 1  # unidades operativas
                 except: nunop = 1
-                self.shl.append(dict(bf=bf,bt=bt,term=term,Q=q,conn='YN',
+                nc = ln[12:16].strip() or '1'           # circuito da linha do reator
+                self.shl.append(dict(bf=bf,bt=bt,nc=nc,term=term,Q=q,conn='YN',
                                      rn=rn,xn=xn,nunop=nunop))
         # DEOL — geradores síncronos com conversor pleno: fontes de corrente de sequência
         # positiva, NÃO entram na Ybus. Régua conforme manual do ANAFAS, apêndice A33-A34.

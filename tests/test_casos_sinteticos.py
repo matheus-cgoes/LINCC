@@ -636,3 +636,19 @@ def test_toda_funcao_de_alto_nivel_declara_premissas():
     r = ajuste_sobrecorrente(M, "transformador", (trafo["bf"], trafo["bt"], trafo["nc"]),
                              dados={"in_nominal": 100.0})
     assert any("NOMINAL" in p and "emergência" in p for p in r["premissas"])
+
+
+def test_reator_de_linha_sai_com_a_linha():
+    """Linha retirada leva o reator junto; linha pendurada (terminal aberto) o mantém."""
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    M.shl.append(dict(bf=1, bt=2, nc="1", term="D", Q=-50.0, conn="YN",
+                      rn=None, xn=0.0, nunop=1))
+    com = Solver(M, drop_branches=[(1, 2, "1")], modo="sincronas"); com.factor(avisar=False)
+    M2 = AnaModel(str(CASES / "caso1_radial.ANA"))
+    sem = Solver(M2, drop_branches=[(1, 2, "1")], modo="sincronas"); sem.factor(avisar=False)
+    # com a linha retirada, o reator dela não altera a rede
+    assert com.fault(1, "1FT") == pytest.approx(sem.fault(1, "1FT"), rel=1e-12)
+    # mantido explicitamente, volta a ser caminho para a terra
+    fica = Solver(M, drop_branches=[(1, 2, "1")], modo="sincronas",
+                  manter_reatores=[(1, 2, "1")]); fica.factor(avisar=False)
+    assert fica.fault(1, "1FT") != pytest.approx(sem.fault(1, "1FT"), rel=1e-6)
