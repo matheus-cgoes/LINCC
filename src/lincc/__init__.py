@@ -87,6 +87,15 @@ FUNÇÕES DE ALTO NÍVEL — resolvem o estudo inteiro numa chamada
 
     relatorio_curto(M, barra)                 correntes, Thévenin e contribuições
 
+    estudo_barra(M, barra, dados, cenarios)   estudo de proteção de barra completo: 87B,
+                                              checkzone, alarme, 50BF e EFP, com a
+                                              corrente mínima entre rede completa, N-1,
+                                              recomposição e cenários do ANAREDE. É a
+                                              resposta padrão a "proteção da barra X",
+                                              "pickup do 87B", "checkzone", "50BF", "EFP".
+                                              Leva alguns minutos numa base do SIN — avise
+                                              o usuário antes de rodar
+
     ajuste_sobrecorrente(M, tipo, elemento)   faixas admissíveis das funções de
                                               sobrecorrente (51, 50, SOTF, STUB, 67NT na
                                               linha; 51 e 50 no transformador) e se cada
@@ -158,7 +167,8 @@ from .solver import Solver, branches_at                # motor de curto-circuito
 from .protecao import (recomposicao_87b,               # motor de proteção
                        envelope_contribuicoes, tabela_envelope,
                        impacto_entrada, relatorio_curto, relatorio_protecao,
-                       ajuste_sobrecorrente, CRITERIOS_SOBRECORRENTE)
+                       ajuste_sobrecorrente, CRITERIOS_SOBRECORRENTE,
+                       estudo_barra, CRITERIOS_BARRA)
 
 __version__ = "0.3.0"
 __all__ = [
@@ -170,7 +180,7 @@ __all__ = [
     # motor de proteção
     "recomposicao_87b", "envelope_contribuicoes", "tabela_envelope",
     "impacto_entrada", "relatorio_curto", "relatorio_protecao",
-    "ajuste_sobrecorrente", "CRITERIOS_SOBRECORRENTE",
+    "ajuste_sobrecorrente", "CRITERIOS_SOBRECORRENTE", "estudo_barra", "CRITERIOS_BARRA",
     # motor de fluxo de potência
     "fluxo",
     # apoio

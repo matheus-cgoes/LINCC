@@ -278,6 +278,30 @@ correspondência entram ligados no máximo e desligados no mínimo, e a distânc
 duas hipóteses vem como `incerteza_mapeamento_pct`. Os valores por cenário não têm gabarito
 no ANAFAS, que só calcula a rede completa.
 
+## Estudo de proteção de barra
+
+```python
+from lincc import estudo_barra, CRITERIOS_BARRA
+r = estudo_barra(M, barra, dados={'in_tc_ref': 3000}, cenarios=cenarios)
+```
+
+| Função | Critério padrão |
+|---|---|
+| 87B | carga de emergência < pickup < curto mínimo; sugerido 67% do curto mínimo; sem faixa, prevalece o curto |
+| Checkzone | 80% do pickup do 87B |
+| Alarme | 15% do pickup do 87B, abaixo da menor carga nominal dos vãos |
+| 50BF | carga nominal < pickup < falta na extremidade oposta com remoto aberto, alimentação local mais fraca |
+| EFP | pickup < falta junto ao disjuntor aberto, nas duas posições de TC; sem piso de carga |
+| Todas | ≥ 5% de In do TC de referência (maior relação da zona), quando informado |
+
+Corrente mínima: menor entre rede completa, N-1 de cada equipamento (transformador com todas
+as pernas) e do reator de barra, recomposição por cada alimentação isolada (reator de barra
+desligado) e, com o ANAREDE, o menor cenário e sua recomposição. Condições que desenergizam a
+barra não entram. Slope: valores de partida declarados, não calculados.
+
+O estudo fatora cada topologia uma vez; a Zbarra entre as fontes de conversor fica em cache
+por topologia. Numa base do SIN, alguns minutos.
+
 ## Premissas declaradas
 
 Toda função de alto nível — `impacto_entrada`, `relatorio_curto`, `relatorio_protecao`,

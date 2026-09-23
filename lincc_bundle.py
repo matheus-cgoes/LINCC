@@ -1316,6 +1316,27 @@ class Solver:
         self._inorton = self.YP.dot(np.ones(N,dtype=complex))
         return self._inorton
 
+    def _zbarra_fontes(self, idxs):
+        """Submatriz da Zbarra entre as barras indicadas, recortada de um cache.
+
+        A submatriz entre as barras com fonte de conversor depende só da topologia desta
+        instância: não da barra em falta nem do tipo de defeito. É calculada uma vez para
+        todas as fontes e recortada a cada chamada — o que evita centenas de solves
+        repetidos quando o mesmo caso é consultado em vários pontos ou tipos de falta.
+        """
+        cache = getattr(self, '_zfontes', None)
+        if cache is None:
+            todas = sorted({self.IDXP[b] for b in self._fc_sources() if b in self.IDXP})
+            N = len(self.BLP)
+            E = np.zeros((N, len(todas)), dtype=complex)
+            for c, j in enumerate(todas):
+                E[j, c] = 1
+            Z = self.luP.solve(E)[todas, :]
+            cache = self._zfontes = ({j: c for c, j in enumerate(todas)}, Z)
+        pos, Z = cache
+        sel = [pos[j] for j in idxs]
+        return Z[np.ix_(sel, sel)]
+
     def _estado_fc(self, bus, niter=400, damp=1.0, tol=1e-8, strict=True,
                    ang_prefalta=False, tol_saida=1e-5, Zf=0.0):
         """Resolve o estado da rede com as fontes DEOL ativas, para falta franca em `bus`.
@@ -1378,11 +1399,7 @@ class Solver:
         n = len(idxs)
         # Submatriz de impedâncias COM a falta aplicada: Z_f = Z − z_k z_k^T / Z_kk,
         # restrita às barras com DEOL. É o acoplamento que o Newton precisa.
-        E = np.zeros((N, n), dtype=complex)
-        for c, j in enumerate(idxs):
-            E[j, c] = 1
-        Zcols = self.luP.solve(E)                       # N x n
-        Zsub = Zcols[idxs, :]                           # n x n
+        Zsub = self._zbarra_fontes(idxs)                # n x n
         zk_sub = zk[idxs].reshape(-1, 1)
         Zf = Zsub - (zk_sub @ zk_sub.T) / Zkk           # com a falta em k
         Vth = V[idxs].copy()                            # tensão com falta e sem injeção
@@ -2097,6 +2114,10 @@ class Solver:
         self.validado_completo = selo['erro_max'] < limite
         selo['liberado'] = self.validado_completo
         self._selo_completo = selo
+        if self.validado_completo:
+            # A conferência é da LEITURA do caso: fica registrada no próprio modelo, e todo
+            # cálculo derivado dele (contingência, recomposição, cenário) a herda.
+            self.M._leitura_conferida = dict(selo)
         return selo
 
     def conciliar(self, z1_ref, z0_ref=None, limite=1.0):
@@ -2211,7 +2232,10 @@ def recomposicao_87b(model, bus, kinds=('3F','1FT'), modo='completo'):
         # hipótese de menor corrente, e a que reproduz o ANAFAS na recomposição.
         S=Solver(model, drop_branches=drop, modo=modo, drop_reatores_barra=[bus])
         S.factor(avisar=False)
-        if modo=='completo':
+        if modo=='completo' and getattr(model, '_leitura_conferida', None):
+            S.validado_completo=True
+            S._selo_completo=dict(model._leitura_conferida, conferido_no_caso=True)
+        elif modo=='completo':
             # A recomposição monta dezenas de cenários; cada um é um Solver novo, e o
             # bloqueio do modo completo é por instância. Propaga-se a liberação, porque a
             # decisão de usar o modo completo foi tomada por quem chamou.
@@ -2389,11 +2413,18 @@ def _premissas_curto(S):
     return p
 
 
-def _solver(model, drop=None, modo='completo'):
+def _solver(model, drop=None, modo='completo', manter_reatores=None,
+            drop_reatores_barra=None):
     # avisar=False: numa chamada de alto nível o aviso apareceria uma vez por cenário
     # interno — o relatório declara o modo no retorno, que é onde interessa.
-    S = Solver(model, drop_branches=list(drop) if drop else None, modo=modo)
+    S = Solver(model, drop_branches=list(drop) if drop else None, modo=modo,
+               manter_reatores=manter_reatores, drop_reatores_barra=drop_reatores_barra)
     S.factor(avisar=False)
+    conf = getattr(model, '_leitura_conferida', None)
+    if modo == 'completo' and conf:
+        S.validado_completo = True
+        S._selo_completo = dict(conf, conferido_no_caso=True)
+        return S
     if modo == 'completo':
         S.liberar_completo_sem_gabarito('chamada de alto nível sem gabarito do caso')
     return S
@@ -2846,6 +2877,331 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
     else:
         raise ValueError("tipo deve ser 'linha' ou 'transformador'")
     return out
+
+
+# ====================================================================== #
+#  Estudo de proteção de barra: 87B, checkzone, alarme, 50BF e EFP       #
+# ====================================================================== #
+
+CRITERIOS_BARRA = dict(
+    f_icc=0.67,          # ajuste sugerido: 67% do curto mínimo (relação de sensibilidade 1,5)
+    f_checkzone=0.80,    # checkzone: 80% do pickup do 87B
+    f_alarme=0.15,       # alarme diferencial: 15% do pickup do 87B
+    piso_in_tc=0.05,     # todo pickup acima de 5% de In do TC de referência
+    slope1=0.50, slope2=0.80, inflexao_in=(2.0, 3.0),   # valores de PARTIDA, não calculados
+)
+
+
+def _i_aberto(Z1, Z0, z1L, z0L, p, kind, Ib, f=1.0):
+    """Corrente pelo terminal fechado para falta a fração `p` de uma linha com o outro
+    terminal aberto, pelo Thévenin da barra sem a linha. Mesmas convenções de `fault`."""
+    if Z1 is None:
+        return None
+    Z1t = Z1 + p * z1L
+    if kind == '3F':
+        I = 1 / Z1t
+    elif kind == '2F':
+        I = np.sqrt(3) / (2 * Z1t)
+    else:
+        if Z0 is None or z0L is None:
+            return None
+        Z0t = Z0 + p * z0L
+        if kind == '1FT':
+            I = 3 / (2 * Z1t + Z0t)
+        else:
+            a = np.exp(2j * np.pi / 3)
+            den = Z1t * Z1t + 2 * Z1t * Z0t
+            ib = (Z0t - a * Z1t) / den
+            ic = (Z0t - a.conjugate() * Z1t) / den
+            return np.sqrt(3) * max(abs(ib), abs(ic)) * Ib * f * 1000.0
+    return abs(I) * Ib * f * 1000.0
+
+
+def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
+                 modo='completo', kinds=_KINDS):
+    """Estudo de proteção de uma barra: 87B, checkzone, alarme diferencial, 50BF e EFP.
+
+    Resolve o estudo inteiro a partir do pedido "proteção da barra X". Tudo em A primários.
+
+    Corrente mínima de curto na barra: o menor valor entre rede completa, N-1 de cada
+    equipamento incidente (transformador com todas as pernas) e do reator de barra,
+    recomposição por cada alimentação isolada (com o reator de barra desligado) e, com os
+    casos do ANAREDE, o menor cenário de despacho — incluindo a recomposição nesse
+    cenário. Não se usa a condição com apenas o reator de barra conectado.
+
+    Cargas por vão: capacidade de emergência e nominal do ANAREDE; sem ele, a potência
+    nominal do .ANA, declarada como provisória.
+
+    Critérios (padrão em CRITERIOS_BARRA, todos declarados em `premissas`):
+
+      87B        carga de emergência < pickup < curto mínimo; sugerido 67% do curto
+                 mínimo. Se a faixa não existir, prevalece o curto.
+      checkzone  80% do pickup do 87B.
+      alarme     15% do pickup do 87B, abaixo da menor carga nominal dos vãos — para
+                 detectar TC aberto sem disparo, que o pickup acima da carga garante.
+      50BF       carga nominal do vão < pickup < falta na extremidade oposta da linha com
+                 o terminal remoto aberto, com a alimentação local mais fraca.
+      EFP        pickup < falta junto ao disjuntor aberto, nas duas posições de TC; sem
+                 piso de carga, porque com o disjuntor aberto só circula corrente de falta.
+      todas      pickup >= 5% de In do TC de referência (maior relação da zona), quando
+                 `dados['in_tc_ref']` é informado, ou o ajuste mínimo do relé, se maior.
+
+    Slope: valores de partida declarados, não calculados — dependem da definição de
+    restrição do IED e do estudo de saturação.
+
+    O estudo fatora uma topologia por condição (N-1, recomposição, cada par de linha e
+    alimentação fraca) e leva alguns minutos numa base do SIN.
+    """
+    from .dados_externos import da_base
+    from .sm211 import funcoes_exigidas
+    crit = dict(CRITERIOS_BARRA); crit.update(criterios or {})
+    dados = dict(dados or {})
+    kv = model.bus_kv.get(barra)
+    Ib = SB / (np.sqrt(3) * kv)
+    inc = _ramos_incidentes(model, barra)
+    kinds = tuple(kinds)
+
+    def outro(r):
+        return r[1] if r[0] == barra else r[0]
+
+    def e_trafo(r):
+        return not model.bus_kv.get(outro(r))
+
+    def equipamento(r):
+        """Ramos a retirar para tirar o equipamento: trafo leva todas as pernas."""
+        if not e_trafo(r):
+            return [r]
+        no = outro(r)
+        return [(x['bf'], x['bt'], str(x['nc'])) for x in model.branches
+                if no in (x['bf'], x['bt'])]
+
+    def nome(r):
+        return f"{'T' if e_trafo(r) else 'L'} {r[0]}-{r[1]}/{r[2]}"
+
+    S0 = _solver(model, None, modo)
+    prem = _premissas_curto(S0)
+    cand = []          # (corrente_A, condição)
+
+    I_DESENERGIZADA = 1.0     # A — abaixo disso a condição deixa a barra sem alimentação
+
+    def curto_barra(S, rot):
+        for k in kinds:
+            try:
+                v = S.fault(barra, k) * 1000.0
+            except Exception:
+                continue
+            if v > I_DESENERGIZADA:
+                cand.append((v, f'{rot}, {k}'))
+
+    # --- corrente mínima na barra ---
+    curto_barra(S0, 'rede completa')
+    for r in inc:
+        try:
+            curto_barra(_solver(model, equipamento(r), modo), f'N-1 sem {nome(r)}')
+        except Exception:
+            pass
+    tem_reator = any(h.get('bus') == barra for h in model.shunts)
+    if tem_reator:
+        curto_barra(_solver(model, None, modo, drop_reatores_barra=[barra]),
+                    'N-1 sem o reator de barra')
+    tab, _ = recomposicao_87b(model, barra, kinds=kinds, modo=modo)
+    for rot, ram, v in tab:
+        for k in kinds:
+            if v.get(k) and v[k] * 1000.0 > I_DESENERGIZADA:
+                cand.append((v[k] * 1000.0, f'recomposição por {nome(ram)}, {k}'))
+    recomp = {ram: v for _, ram, v in tab}
+    if cenarios:
+        from .fluxo import curto_por_cenario, aplicar_despacho
+        cc = curto_por_cenario(model, cenarios, [barra], kinds=kinds, modo=modo,
+                               caso_conferido=bool(getattr(model, '_leitura_conferida', None)))
+        piores = []
+        for k in kinds:
+            e = cc['extremos'].get((barra, k))
+            if e:
+                cand.append((e['min'][0], f"cenário {e['min'][1]}, {k}"))
+                piores.append(e['min'])
+        if piores:
+            nome_cen = min(piores)[1]
+            Mc, _ = aplicar_despacho(model, cenarios[nome_cen], sem_correspondencia='retirar')
+            tabc, _ = recomposicao_87b(Mc, barra, kinds=kinds, modo=modo)
+            for rot, ram, v in tabc:
+                for k in kinds:
+                    if v.get(k) and v[k] * 1000.0 > I_DESENERGIZADA:
+                        cand.append((v[k] * 1000.0,
+                                     f'recomposição por {nome(ram)} no cenário {nome_cen}, {k}'))
+        prem += [p for p in cc['premissas'] if p not in prem]
+    icc_min, cond_min = min(cand)
+
+    # --- cargas por vão ---
+    cargas = {}
+    for r in inc:
+        c = dict(emergencia_A=None, nominal_A=None, origem=None)
+        if cenarios:
+            from .fluxo import carga_maxima
+            cm = carga_maxima(cenarios, r[0], r[1], r[2])
+            if cm and (cm.get('cap_emergencia_A') or cm.get('cap_normal_A')):
+                c.update(emergencia_A=cm.get('cap_emergencia_A') or cm.get('cap_normal_A'),
+                         nominal_A=cm.get('cap_normal_A'), origem='ANAREDE')
+        if c['origem'] is None:
+            b = da_base(model, *r)
+            if b.get('in_nominal'):
+                c.update(nominal_A=b['in_nominal'], emergencia_A=b['in_nominal'],
+                         origem='.ANA, potência nominal (emergência não disponível)')
+        cargas[nome(r)] = c
+    emerg = [c['emergencia_A'] for c in cargas.values() if c['emergencia_A']]
+    nomin = [c['nominal_A'] for c in cargas.values() if c['nominal_A']]
+    carga_max = max(emerg) if emerg else None
+    carga_min_nom = min(nomin) if nomin else None
+
+    in_ref = dados.get('in_tc_ref')
+    piso_tc = (max(crit['piso_in_tc'], dados.get('ajuste_minimo_rele', 0) or 0) * float(in_ref)
+               if in_ref else None)
+
+    def aplica_piso(v, alertas):
+        if piso_tc and v < piso_tc:
+            alertas.append(f'elevado ao piso de medição de {piso_tc:.0f} A '
+                           f'({crit["piso_in_tc"]:.0%} de In do TC de referência)')
+            return piso_tc
+        return v
+
+    funcoes, alertas87 = {}, []
+    sug = crit['f_icc'] * icc_min
+    if carga_max is None:
+        pk = sug; alertas87.append('carga dos vãos não disponível: piso de carga não verificado')
+    elif carga_max < icc_min:
+        if sug > carga_max:
+            pk = sug
+        else:
+            pk = carga_max
+            alertas87.append(f'67% do curto mínimo fica abaixo da carga de emergência; '
+                             f'pickup na carga, com relação de sensibilidade '
+                             f'{icc_min / pk:.2f}')
+    else:
+        pk = sug
+        alertas87.append('carga de emergência acima do curto mínimo: prevalece o curto — '
+                         'TC aberto no vão mais carregado pode provocar disparo')
+    pk = aplica_piso(pk, alertas87)
+    if pk >= icc_min:
+        alertas87.append('pickup não fica abaixo do curto mínimo: sensibilidade não garantida')
+    funcoes['87B'] = dict(pickup=pk, faixa=(carga_max, icc_min), icc_min=icc_min,
+                          condicao_icc_min=cond_min, relacao=icc_min / pk,
+                          carga_emergencia_max=carga_max, alertas=alertas87)
+    ac = []
+    ck = aplica_piso(crit['f_checkzone'] * pk, ac)
+    funcoes['checkzone'] = dict(pickup=ck, relacao=icc_min / ck, alertas=ac)
+    aa = []
+    al = aplica_piso(crit['f_alarme'] * pk, aa)
+    if carga_min_nom and al >= carga_min_nom:
+        aa.append(f'alarme acima da menor carga nominal dos vãos ({carga_min_nom:.0f} A): '
+                  f'TC aberto nesse vão não será detectado')
+    funcoes['alarme'] = dict(pickup=al, limite_superior=carga_min_nom, alertas=aa)
+    funcoes['slope'] = dict(slope1=crit['slope1'], slope2=crit['slope2'],
+                            inflexao_em_In_ref=crit['inflexao_in'], calculado=False)
+
+    # --- 50BF e EFP por vão de linha ---
+    bf, efp = {}, {}
+    linhas = [r for r in inc if not e_trafo(r)]
+    for L in linhas:
+        br = S0._find_branch(*L)
+        z1L = complex(br['R1'], br['X1']) / 100
+        z0L = (complex(br['R0'], br['X0']) / 100
+               if br.get('R0') is not None and br.get('X0') is not None else None)
+        rem = outro(L)
+        SL = _solver(model, [L], modo, manter_reatores=[L])
+        c50, cef_l = [], []
+        Z1, _, Z0 = SL.zth(barra)
+        Zr1, _, Zr0 = SL.zth(rem)
+        Ibr = SB / (np.sqrt(3) * model.bus_kv.get(rem, kv))
+        for k in kinds:
+            v = _i_aberto(Z1, Z0, z1L, z0L, 1.0, k, Ib, SL._fator_fc(barra, k))
+            if v: c50.append((v, f'falta na extremidade oposta, remoto aberto, rede normal, {k}'))
+            v = _i_aberto(Zr1, Zr0, z1L, z0L, 1.0, k, Ibr, SL._fator_fc(rem, k))
+            if v: cef_l.append((v, f'alimentação pelo terminal remoto, rede normal, {k}'))
+        for F in inc:
+            if F == L:
+                continue
+            drop = [x for x in inc if x != F]
+            try:
+                SF = _solver(model, drop, modo, manter_reatores=[L],
+                             drop_reatores_barra=[barra])
+            except Exception:
+                continue
+            Z1, _, Z0 = SF.zth(barra)
+            for k in kinds:
+                v = _i_aberto(Z1, Z0, z1L, z0L, 1.0, k, Ib, SF._fator_fc(barra, k))
+                if v: c50.append((v, f'extremidade oposta, remoto aberto, só {nome(F)}, {k}'))
+        cef_b = [(recomp[F][k] * 1000.0, f'alimentação só por {nome(F)}, {k}')
+                 for F in recomp if F != L for k in kinds
+                 if recomp[F].get(k) and recomp[F][k] * 1000.0 > I_DESENERGIZADA]
+        c50 = [x for x in c50 if x[0] > I_DESENERGIZADA]
+        cef_l = [x for x in cef_l if x[0] > I_DESENERGIZADA]
+        if not c50 or not cef_l:
+            continue
+        car = cargas[nome(L)]
+        i50, c50m = min(c50)
+        a50 = []
+        s50 = crit['f_icc'] * i50
+        if car['nominal_A'] and s50 <= car['nominal_A']:
+            if car['nominal_A'] < i50:
+                s50 = car['nominal_A']
+                a50.append('67% do curto mínimo fica abaixo da carga nominal; pickup na carga')
+            else:
+                a50.append('carga nominal acima do curto mínimo: prevalece o curto')
+        s50 = aplica_piso(s50, a50)
+        bf[nome(L)] = dict(pickup=s50, faixa=(car['nominal_A'], i50), icc_min=i50,
+                           condicao=c50m, relacao=i50 / s50, alertas=a50)
+        il, cl = min(cef_l)
+        ib_, cb = min(cef_b) if cef_b else (None, None)
+        el, eb = [], []
+        efp[nome(L)] = dict(
+            tc_lado_linha=dict(pickup=aplica_piso(crit['f_icc'] * il, el), icc_min=il,
+                               condicao=cl, alertas=el),
+            tc_lado_barra=(dict(pickup=aplica_piso(crit['f_icc'] * ib_, eb), icc_min=ib_,
+                                condicao=cb, alertas=eb) if ib_ else None))
+    funcoes['50BF'] = bf
+    funcoes['EFP'] = efp
+
+    prem += [
+        f'corrente mínima na barra: menor entre rede completa, N-1 de cada equipamento '
+        f'(transformador com todas as pernas){", reator de barra" if tem_reator else ""} e '
+        f'recomposição por cada alimentação isolada' +
+        (', e o menor cenário de despacho do ANAREDE com a sua recomposição' if cenarios else ''),
+        'recomposição: demais conexões e reator de barra desligados; não se usa a condição '
+        'com apenas o reator de barra conectado',
+        'condições que deixam a barra sem alimentação são desconsideradas',
+        f"87B: acima da carga de emergência e abaixo do curto mínimo; sugerido "
+        f"{crit['f_icc']:.0%} do curto mínimo; se a faixa não existir, prevalece o curto",
+        f"checkzone: {crit['f_checkzone']:.0%} do pickup do 87B",
+        f"alarme: {crit['f_alarme']:.0%} do pickup do 87B, abaixo da menor carga nominal "
+        f"dos vãos; o limite inferior (acima do diferencial permanente) e a temporização "
+        f"dependem dos TCs e não foram verificados",
+        f"50BF: acima da carga nominal do vão e abaixo da falta na extremidade oposta com o "
+        f"terminal remoto aberto, na alimentação local mais fraca; sugerido "
+        f"{crit['f_icc']:.0%} dessa corrente. Disparos sem corrente de falta (sobretensão, "
+        f"transferência) exigem lógica por contato do disjuntor",
+        f"EFP: abaixo da falta junto ao disjuntor aberto, sugerido {crit['f_icc']:.0%}; lado "
+        f"da linha alimentado pelo terminal remoto, lado da barra pela barra; sem piso de "
+        f"carga; a posição real do TC define qual vale",
+        f"slope: valores de partida {crit['slope1']:.0%} e {crit['slope2']:.0%}, inflexão em "
+        f"{crit['inflexao_in'][0]:g} a {crit['inflexao_in'][1]:g} × In do TC de referência — "
+        f"não transferíveis entre fabricantes, dependem da definição de restrição do IED e "
+        f"do estudo de saturação",
+        'cargas por vão: ' + ('capacidades do ANAREDE (emergência e normal)' if cenarios
+                              else 'potência nominal do .ANA; emergência não disponível'),
+        'arranjo da subestação não informado: cargas por vão, sem composição por diagonal',
+        '50BF e EFP de vãos de transformador não calculados',
+    ]
+    if piso_tc:
+        prem.append(f"piso de medição: {crit['piso_in_tc']:.0%} de In do TC de referência "
+                    f"({float(in_ref):.0f} A)")
+    faltantes = []
+    if not in_ref:
+        faltantes.append('in_tc_ref')
+    if not cenarios:
+        faltantes.append('casos do ANAREDE (carga de emergência por vão)')
+    return dict(barra=barra, nome=model.bus_name.get(barra, ''), kv=kv, modo=modo,
+                funcoes=funcoes, cargas=cargas, premissas=prem, faltantes=faltantes,
+                funcoes_sm211=funcoes_exigidas('barra'))
 
 
 # ===================== motor de fluxo de potencia =====================

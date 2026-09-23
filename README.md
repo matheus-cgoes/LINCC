@@ -84,6 +84,12 @@ barras que ultrapassam o gatilho de revisão e o tipo de defeito responsável.
 capacitor — com as grandezas do tipo, os cenários de contingência, as funções que o
 Submódulo 2.11 exige e a lista do que ainda falta para parametrizar.
 
+**Estudo de proteção de barra** completo a partir de um pedido como "proteção da barra X":
+pickup da diferencial, checkzone, alarme de TC aberto, falha de disjuntor e proteção de zona
+morta, com a menor corrente de curto buscada entre rede normal, contingências, recomposição
+da barra por cada alimentação e cenários de operação. Os critérios usados vêm declarados, e
+quando a faixa de ajuste não existe, o relatório diz qual critério prevaleceu e por quê.
+
 **Envelope por vão** de uma subestação: maior e menor corrente de fase e de terra em cada
 vão, varrendo os quatro tipos de defeito, sistema completo e contingência simples, retirada
 de equipamento e terminal remoto aberto — com o cenário em que cada extremo ocorreu.

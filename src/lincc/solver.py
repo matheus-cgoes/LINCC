@@ -724,6 +724,27 @@ class Solver:
         self._inorton = self.YP.dot(np.ones(N,dtype=complex))
         return self._inorton
 
+    def _zbarra_fontes(self, idxs):
+        """Submatriz da Zbarra entre as barras indicadas, recortada de um cache.
+
+        A submatriz entre as barras com fonte de conversor depende só da topologia desta
+        instância: não da barra em falta nem do tipo de defeito. É calculada uma vez para
+        todas as fontes e recortada a cada chamada — o que evita centenas de solves
+        repetidos quando o mesmo caso é consultado em vários pontos ou tipos de falta.
+        """
+        cache = getattr(self, '_zfontes', None)
+        if cache is None:
+            todas = sorted({self.IDXP[b] for b in self._fc_sources() if b in self.IDXP})
+            N = len(self.BLP)
+            E = np.zeros((N, len(todas)), dtype=complex)
+            for c, j in enumerate(todas):
+                E[j, c] = 1
+            Z = self.luP.solve(E)[todas, :]
+            cache = self._zfontes = ({j: c for c, j in enumerate(todas)}, Z)
+        pos, Z = cache
+        sel = [pos[j] for j in idxs]
+        return Z[np.ix_(sel, sel)]
+
     def _estado_fc(self, bus, niter=400, damp=1.0, tol=1e-8, strict=True,
                    ang_prefalta=False, tol_saida=1e-5, Zf=0.0):
         """Resolve o estado da rede com as fontes DEOL ativas, para falta franca em `bus`.
@@ -786,11 +807,7 @@ class Solver:
         n = len(idxs)
         # Submatriz de impedâncias COM a falta aplicada: Z_f = Z − z_k z_k^T / Z_kk,
         # restrita às barras com DEOL. É o acoplamento que o Newton precisa.
-        E = np.zeros((N, n), dtype=complex)
-        for c, j in enumerate(idxs):
-            E[j, c] = 1
-        Zcols = self.luP.solve(E)                       # N x n
-        Zsub = Zcols[idxs, :]                           # n x n
+        Zsub = self._zbarra_fontes(idxs)                # n x n
         zk_sub = zk[idxs].reshape(-1, 1)
         Zf = Zsub - (zk_sub @ zk_sub.T) / Zkk           # com a falta em k
         Vth = V[idxs].copy()                            # tensão com falta e sem injeção
@@ -1505,6 +1522,10 @@ class Solver:
         self.validado_completo = selo['erro_max'] < limite
         selo['liberado'] = self.validado_completo
         self._selo_completo = selo
+        if self.validado_completo:
+            # A conferência é da LEITURA do caso: fica registrada no próprio modelo, e todo
+            # cálculo derivado dele (contingência, recomposição, cenário) a herda.
+            self.M._leitura_conferida = dict(selo)
         return selo
 
     def conciliar(self, z1_ref, z0_ref=None, limite=1.0):

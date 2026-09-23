@@ -664,3 +664,32 @@ def test_reator_de_barra_pode_ser_desligado():
     base.factor(avisar=False)
     assert sem.fault(2, "1FT") == pytest.approx(base.fault(2, "1FT"), rel=1e-12)
     assert com.fault(2, "1FT") > sem.fault(2, "1FT")      # reator aterrado eleva a 1FT
+
+
+def test_estudo_barra_corrente_de_terminal_aberto_confere_com_line_end_open(radial):
+    """A corrente com terminal remoto aberto do estudo de barra é a do line_end_open."""
+    from lincc.protecao import _i_aberto
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    SL = Solver(M, drop_branches=[(1, 2, "1")], manter_reatores=[(1, 2, "1")],
+                modo="sincronas"); SL.factor(avisar=False)
+    br = SL._find_branch(1, 2, "1")
+    z1 = complex(br["R1"], br["X1"]) / 100
+    z0 = complex(br["R0"], br["X0"]) / 100
+    Z1, _, Z0 = SL.zth(1)
+    Ib = SB / (math.sqrt(3) * M.bus_kv[1])
+    for k in ("3F", "1FT", "2F", "2FT"):
+        assert _i_aberto(Z1, Z0, z1, z0, 1.0, k, Ib) == pytest.approx(
+            radial.line_end_open(1, 2, "1", 1, k, p=1.0, modo="sincronas") * 1000, rel=1e-9)
+
+
+def test_estudo_barra_aplica_os_criterios_e_declara_premissas():
+    from lincc import estudo_barra
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    r = estudo_barra(M, 2, dados={"in_tc_ref": 1000.0})
+    f = r["funcoes"]
+    icc = f["87B"]["icc_min"]
+    assert f["87B"]["pickup"] <= icc
+    assert f["checkzone"]["pickup"] == pytest.approx(max(0.8 * f["87B"]["pickup"], 50.0))
+    assert f["alarme"]["pickup"] >= 50.0                  # piso de 5% de In do TC
+    assert not f["slope"]["calculado"]
+    assert any("87B" in p for p in r["premissas"])
