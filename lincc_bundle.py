@@ -1,14 +1,167 @@
-"""LINCC — Linguagem Natural em Curto-Circuito (arquivo único, autocontido).
+"""LINCC — Linguagem Natural em Curto-Circuito.
 
-GERADO por ferramentas/gerar_bundle.py a partir de src/lincc/. Não editar à mão: corrija no
-pacote e regenere. Requer apenas numpy e scipy.
+Motor de curto-circuito para sistemas de transmissão: lê casos em formato .ANA, monta as
+redes de sequência positiva e zero e calcula equivalentes de Thévenin e correntes de falta
+por fatoração LU esparsa.
 
-    from lincc_bundle import AnaModel, Solver
-    M = AnaModel("caso.ANA"); S = Solver(M); S.factor()
-    S.fault(BARRA, "3F")
+NÃO substitui ferramenta homologada. Ver README para isenção de responsabilidade.
 
-NÃO substitui ferramenta homologada. Ver README para isenção de responsabilidade e limites.
+═══════════════════════════════════════════════════════════════════════════════════════
+PROTOCOLO DE TRABALHO — vale para toda chamada, sem precisar ser repetido no pedido
+═══════════════════════════════════════════════════════════════════════════════════════
+
+1. Este motor é a fonte de verdade. Importe e use; não recrie a modelagem de memória, não
+   reescreva o parser, não calcule nada à mão. Todo número de um estudo sai daqui.
+
+2. VALIDE O CASO ANTES DE EMITIR CORRENTE, e conduza isso sozinho — o usuário não precisa
+   conhecer nem executar os comandos.
+
+   Toda base real do ONS traz 400 a 500 eólicas e fotovoltaicas conectadas por conversor,
+   e o número regulatório é o que as inclui. O motor só o devolve depois de conferir a
+   leitura deste caso contra o relatório do ANAFAS do MESMO caso:
+
+       from lincc import niveis_kA
+       selo = S.validar_completo(niveis_kA("RELATORIO.LST"), limite=1.0)
+
+   O que fazer conforme a situação, sem transferir a decisão técnica ao usuário:
+
+   a) Relatório anexado -> valide e siga. Informe o resultado em uma linha ("caso
+      conferido contra o relatório, erro máximo X%").
+   b) Relatório NÃO anexado -> PEÇA-O ao usuário, explicando em linguagem simples: é o
+      relatório de níveis de curto-circuito do ANAFAS, do mesmo caso, e serve para
+      conferir a leitura do arquivo antes de emitir corrente.
+   c) Usuário não tem o relatório -> explique as duas alternativas em português corrente,
+      SEM mencionar nomes de função: ou você segue com o número que inclui as usinas de
+      conversor, sem essa conferência, ou usa o valor conservador que as exclui. Pergunte
+      qual ele prefere, execute (`liberar_completo_sem_gabarito()` ou
+      `modo='sincronas'`) e REGISTRE a hipótese no relatório final.
+
+   Nunca escolha em silêncio, e nunca devolva comando para o usuário executar.
+
+3. BASES DO ANAREDE (.PWF), quando anexadas. Use-as sem que o usuário precise pedir:
+
+   - Carga máxima dos circuitos: passe os cenários a `ajuste_sobrecorrente(...,
+     cenarios=...)`. A carga sai da capacidade de EMERGÊNCIA declarada no ANAREDE, em vez
+     de ser pedida ao usuário. Todo pickup que dependa de carga fica acima desse limite:
+     em regime de emergência o equipamento não pode ser desligado pela proteção.
+   - Curto-circuito entre cenários: `fluxo.curto_por_cenario(M, cenarios, barras)`. O
+     ANAFAS calcula sempre a rede completa; os cenários retiram as usinas paradas, e o
+     MÍNIMO de curto para sensibilidade costuma cair bem abaixo da rede completa (15% numa
+     barra de 500 kV do caso de referência). O envelope já sai conservador nos dois lados:
+     máximo com os geradores sem correspondência ligados, mínimo com eles desligados.
+   - Antes de usar as duas bases juntas, `conciliar_bases(M, P)` e registre o resultado.
+
+   Declare no relatório que os valores por cenário não têm gabarito no ANAFAS — ele não
+   calcula despacho parcial — e informe a incerteza de mapeamento que o retorno traz.
+   Fluxo por circuito é estimativa: o arquivo grava tensão com 3 casas, e o retorno traz
+   a incerteza de cada valor. As capacidades são exatas.
+
+4. DECLARE TODAS AS PREMISSAS. Toda função de alto nível devolve `premissas`: a lista do
+   que foi assumido no cálculo — modo, tensão pré-falta, critérios de ajuste, origem da
+   carga, hipóteses de despacho. Apresente-a ao usuário, sempre que a função for usada,
+   em linguagem de engenharia. Nenhum número deve chegar ao usuário sem as premissas que
+   o produziram.
+
+5. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
+   capacidade de interrupção e carga máxima operativa NÃO estão no .ANA. As funções de
+   alto nível devolvem `dados_faltantes` com o que falta e o critério que cada item
+   bloqueia — reporte a lista em vez de estimar.
+
+6. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
+   conectadas por conversor; 'sincronas' é o Thévenin puro. Perto dessas usinas a
+   diferença passa de 40%. Não misture os dois num mesmo critério.
+
+7. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
+   primária do TC, não a do equipamento protegido.
+
+8. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
+   banco de três enrolamentos exige remover TODAS as pernas do nó-estrela; e se o
+   equipamento novo já está na base, o cenário "antes" é o contrafactual — remova-o.
+
+FUNÇÕES DE ALTO NÍVEL — resolvem o estudo inteiro numa chamada
+
+    impacto_entrada(M, [(bf, bt, nc)])        evolução de curto pela entrada de um
+                                              equipamento, nos quatro tipos de defeito,
+                                              com as barras acima do gatilho de 10% e o
+                                              tipo que governou
+
+    relatorio_curto(M, barra)                 correntes, Thévenin e contribuições
+
+    estudo_barra(M, barra, dados, cenarios)   estudo de proteção de barra completo: 87B,
+                                              checkzone, alarme, 50BF e EFP, com a
+                                              corrente mínima entre rede completa, N-1,
+                                              recomposição e cenários do ANAREDE. É a
+                                              resposta padrão a "proteção da barra X",
+                                              "pickup do 87B", "checkzone", "50BF", "EFP".
+                                              Leva alguns minutos numa base do SIN — avise
+                                              o usuário antes de rodar
+
+    ajuste_sobrecorrente(M, tipo, elemento)   faixas admissíveis das funções de
+                                              sobrecorrente (51, 50, SOTF, STUB, 67NT na
+                                              linha; 51 e 50 no transformador) e se cada
+                                              uma é viável. NÃO escolhe o ajuste: devolve
+                                              a faixa e o limite que governa. Faixa vazia
+                                              significa função inviável — reporte, com o
+                                              motivo, em vez de propor valor fora dela
+
+    relatorio_protecao(M, tipo, elemento)     tipo: 'linha', 'transformador', 'barra',
+                                              'reator' ou 'capacitor'. Traz as grandezas
+                                              do tipo, N-1, as funções que o Submódulo
+                                              2.11 exige e os dados faltantes
+
+Elas embutem o protocolo acima. Um pedido não precisa enumerar tipos de defeito,
+contingências nem formato de saída.
+
+═══════════════════════════════════════════════════════════════════════════════════════
+OS DOIS MODOS — a escolha muda o resultado
+═══════════════════════════════════════════════════════════════════════════════════════
+
+    M = AnaModel("caso.ANA");  S = Solver(M);  S.factor()
+
+    S = Solver(M)                          modo 'completo' (PADRÃO)
+    S = Solver(M, modo='sincronas')        Thévenin puro, sem conversores
+
+O MODO É PROPRIEDADE DO SOLVER, não parâmetro de cada chamada. Toda grandeza da instância
+— fault, contribution, branch_current, bus_voltage, line_end_open, fault_on_branch,
+fault_on_shunt, envelope — segue o mesmo modo, e os solvers internos de cenário o herdam.
+
+Passar `modo=` numa chamada isolada é exceção, para comparar os dois num mesmo estudo; a
+diferença tem de ser declarada no relatório.
+
+`completo` inclui as eólicas e fotovoltaicas conectadas por conversor (bloco DEOL) e é o
+padrão, por ser o número regulatório. `sincronas` é o Thévenin puro da Ybus e as exclui.
+Perto dessas usinas a diferença passa de 40% — não é refinamento, é outra resposta.
+
+Cada modo tem uma âncora de validação distinta no relatório do ANAFAS. Confundi-las é o
+erro mais comum e reprova função que está correta:
+
+    sincronas  ->  'RELATORIO DE DADOS DE CURTO-CIRCUITO'    (MVA; exclui conversores)
+    completo   ->  'RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO'   (kA;  inclui conversores)
+
+Não misture modos dentro de um mesmo critério. O envelope de TC combina ICC_MAX de um
+cenário com ICC_MIN de outro: usar `sincronas` de um lado e `completo` do outro produz
+margem fictícia.
+
+QUAL USAR
+    completo   capacidade de interrupção, saturação de TC, esforços eletrodinâmicos,
+               limite superior de DiffOperLevel — é o número regulatório.
+    ambos      sensibilidade, ICC_MIN, pickup de 51/51N, alcance de zonas. Conversor pleno
+               não é fonte confiável em curto sustentado, e o mínimo com inversores pode
+               ser maior ou menor conforme o afundamento. Assumir só um lado é que é erro.
+
+Num caso COM registros DEOL, o modo completo vem BLOQUEADO até ser conferido contra o
+próprio caso. Num caso sem DEOL, os dois modos coincidem e nada precisa ser validado.
+
+    selo = S.validar_completo(niveis_kA, limite=1.0)     # {barra: corrente_kA}
+
+Chame `lincc.orientacao()` para o guia completo de tolerância e limitações conhecidas.
+
+ARQUIVO ÚNICO. Gerado por ferramentas/gerar_bundle.py a partir de src/lincc/ — não editar
+à mão. Aqui todos os nomes do pacote são globais: use `import lincc_bundle as lincc` e as
+chamadas documentadas acima valem como estão, inclusive lincc.fluxo.*, lincc.curvas.*,
+lincc.sm211.* e lincc.dados_externos.*. Requer apenas numpy e scipy.
 """
+
 
 from __future__ import annotations
 
@@ -2560,8 +2713,8 @@ def relatorio_protecao(model, tipo, elemento, modo='completo', dados=None,
     NÃO produz ajuste. Produz os insumos: o ajuste depende de critério, e critério é
     decisão de engenharia, declarada pelo usuário.
     """
-    from .sm211 import funcoes_exigidas
-    from .dados_externos import faltantes, RELATORIO
+    pass
+    pass
     S = _solver(model, None, modo)
     out = dict(tipo=tipo, elemento=elemento, modo=modo, grandezas={}, avisos=[])
 
@@ -2711,8 +2864,8 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
 
     Toda corrente em A primários.
     """
-    from .dados_externos import da_base
-    from . import curvas as _curvas
+    pass
+    _curvas = curvas
     dados = dict(dados or {})
     crit = dict(CRITERIOS_SOBRECORRENTE.get(tipo, {}))
     crit.update(criterios or {})
@@ -2725,7 +2878,7 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
             da_caso.add(k)
     origem_carga = 'informada pelo usuário' if dados.get('carga_max_lt') else None
     if cenarios and tipo == 'linha' and dados.get('carga_max_lt') in (None, ''):
-        from .fluxo import carga_maxima
+        pass
         cm = carga_maxima(cenarios, bf, bt, nc)
         if cm and cm.get('carga_max_A'):
             dados['carga_max_lt'] = cm['carga_max_A']
@@ -2952,8 +3105,8 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
     O estudo fatora uma topologia por condição (N-1, recomposição, cada par de linha e
     alimentação fraca) e leva alguns minutos numa base do SIN.
     """
-    from .dados_externos import da_base
-    from .sm211 import funcoes_exigidas
+    pass
+    pass
     crit = dict(CRITERIOS_BARRA); crit.update(criterios or {})
     dados = dict(dados or {})
     kv = model.bus_kv.get(barra)
@@ -3011,7 +3164,7 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
                 cand.append((v[k] * 1000.0, f'recomposição por {nome(ram)}, {k}'))
     recomp = {ram: v for _, ram, v in tab}
     if cenarios:
-        from .fluxo import curto_por_cenario, aplicar_despacho
+        pass
         cc = curto_por_cenario(model, cenarios, [barra], kinds=kinds, modo=modo,
                                caso_conferido=bool(getattr(model, '_leitura_conferida', None)))
         piores = []
@@ -3037,7 +3190,7 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
     for r in inc:
         c = dict(emergencia_A=None, nominal_A=None, origem=None)
         if cenarios:
-            from .fluxo import carga_maxima
+            pass
             cm = carga_maxima(cenarios, r[0], r[1], r[2])
             if cm and (cm.get('cap_emergencia_A') or cm.get('cap_normal_A')):
                 c.update(emergencia_A=cm.get('cap_emergencia_A') or cm.get('cap_normal_A'),
@@ -3487,7 +3640,7 @@ def curto_por_cenario(ana, cenarios, barras, kinds=('3F', '1FT'), modo='completo
     valores por cenário não têm gabarito no ANAFAS, que só calcula a rede completa, e o
     método fica declarado no retorno.
     """
-    from .solver import Solver
+    pass
 
     def calcular(M):
         S = Solver(M, modo=modo)
@@ -3864,4 +4017,149 @@ def RELATORIO(chaves, tipo=None):
         "\n\nO cálculo de curto-circuito não depende destes dados e segue normalmente.")
 
 
-__all__ = ["AnaModel", "Solver", "branches_at", "recomposicao_87b", "SB", "num", "zfin", "zn3"]
+# ===================== orientação para agentes =====================
+
+_ORIENTACAO = """
+═══════════════════════════════════════════════════════════════════════════════════════
+LINCC — guia de modos, tolerância e limitações conhecidas
+═══════════════════════════════════════════════════════════════════════════════════════
+
+0. ORGANIZAÇÃO
+
+   Dois parsers e três motores, em arquivos separados:
+
+       parser_anafas   base de curto-circuito (.ANA)    -> AnaModel
+       parser_anarede  base de fluxo de potência (.PWF) -> PwfModel
+       solver          motor de CURTO-CIRCUITO
+       protecao        motor de PROTEÇÃO
+       fluxo           motor de FLUXO DE POTÊNCIA
+
+   A dependência corre numa direção só: proteção usa o solver, o solver não conhece
+   proteção. O cálculo de curto é validado barra a barra contra o ANAFAS e não muda
+   porque um critério de proteção mudou. Detalhes em docs/arquitetura.md.
+
+1. OS DOIS MODOS
+
+   S.fault(bus, kind)                    'completo' (PADRÃO): inclui o bloco DEOL.
+   S.fault(bus, kind, modo='sincronas')  Thévenin puro, SEM conversores.
+
+   Validar cada um contra a seção certa do relatório do ANAFAS:
+       sincronas -> 'RELATORIO DE DADOS DE CURTO-CIRCUITO'   (MVA)
+       completo  -> 'RELATÓRIO DE NÍVEIS DE CURTO-CIRCUITO'  (kA)
+   Comparar `fault` com a seção de níveis reprova função correta: a seção de níveis
+   inclui os conversores e o Thévenin não.
+
+2. COMO ESCOLHER A TOLERÂNCIA
+
+   `validar_completo(niveis, limite=X)` só libera o modo se o erro máximo ficar dentro
+   de X%. No caso de referência (BR2812PI, 828 barras com conversor próximo):
+
+       tolerância    dentro     fora
+          0,1%        96,2%      31
+          0,5%        99,5%       4
+          1,0%       100,0%       0     <- recomendado, e o caso de referência passa
+
+   Mediana 0,019%, p95 0,067%, máximo 0,920%, sobre as 817 barras que convergem entre as
+   828 com conversor próximo. Mantenha 1%: é o critério que o caso de referência atende
+   sem exclusões, e apertar para 0,5% rejeitaria quatro barras por margem numérica.
+
+   O parâmetro `ignorar` continua disponível para o caso de um horizonte novo trazer
+   divergência documentada — as excluídas seguem no relatório, marcadas:
+
+       selo = S.validar_completo(niveis, limite=1.0, ignorar=(...))
+
+3. VALIDAR UM CASO NOVO É OBRIGATÓRIO
+
+   O parser lê o FORMATO, não um caso específico. Um tipo de registro que não apareça no
+   caso de referência é ignorado em silêncio: o número sai, e sai errado. Antes de usar
+   um caso que você não conferiu:
+
+       python examples/validar_caso.py CASO.ANA RELATORIO.LST
+       S.conciliar(z1_ref, z0_ref)      # Z1 e Z0 barra a barra
+
+   Erro DISPERSO e pequeno é quantização do relatório. Erro CONCENTRADO numa classe de
+   barras (todas de uma tensão, ou todas com certo equipamento) é regra de leitura errada.
+
+4. LIMITAÇÕES CONHECIDAS DO MODO COMPLETO
+
+   a) Não convergência. Cerca de 0,5% das barras esgotam as iterações e levantam
+      RuntimeError em vez de devolver valor. É proposital: valor derivado de iteração
+      não convergida não deve entrar em estudo.
+
+   b) Nenhum resíduo material conhecido no caso de referência, nos quatro tipos de
+      defeito. Trifásica e bifásica-terra: 100,000% das barras que convergem abaixo de 1%.
+      Monofásica: 100,000% das barras com corrente acima de 0,5 kA, mediana 0,012%.
+
+      Ao avaliar a monofásica em barra de parque, filtre por corrente com significado
+      físico: 91% dessas barras têm corrente de referência abaixo de 0,05 kA, porque o
+      transformador do parque é delta e a sequência zero não passa. Sobre 40 A, uma
+      diferença de 5 A aparece como "12% de erro" em estatística agregada.
+
+   c) Capacitância de linha (charging). Existe como opção, `Solver(M, charging=True)`,
+      mas fica DESLIGADA por padrão: o gabarito de impedância de barra do ANAFAS não a
+      inclui, e ligá-la derruba Z1 de 100,000% para 50,4%. O cálculo de falta com
+      terminal aberto do ANAFAS, esse sim, a inclui — daí `line_end_open` errar 4,11% em
+      falta trifásica contra 0,41% na monofásica. Conservador para sensibilidade, não
+      conservador para dimensionamento. Ligar a opção NÃO corrige esse desvio, porque a
+      função remove a linha e a capacitância dela sai junto: a correção pede modelar o
+      trecho como stub pendurado, e está pendente.
+
+   c) Faltas desequilibradas no modo completo usam a tensão equivalente do estado
+      convergido. O conversor contribui só em sequência positiva (manual, item 2.8.3).
+
+5. LIMITAÇÕES GERAIS
+
+   - Falta interna rigorosa de enrolamento exige distribuição de espiras do fabricante.
+     `winding_ground_fault` é triagem: a FORMA da curva é confiável, os absolutos não.
+   - Falta intermediária em linha com acoplamento mútuo é aproximada; o retorno traz
+     `mutua_aprox`.
+   - A base não tem relação de TC, ajuste de IED nem placa. As correntes saem em kA
+     PRIMÁRIOS; com TC, a corrente de base do estudo é a nominal primária do TC.
+   - Elos HVDC back-to-back são bloqueados: não há caminho de curto entre os dois lados.
+   - Inrush não sai da base — é transitório de energização, vem de guia normativo e placa.
+
+6. MODELO DE INJEÇÃO (para quem for auditar)
+
+   Curva do conversor conforme ONS, Procedimentos de Rede, Submódulo 2.10, item 5.8 e
+   Figura 14: corrente reativa adicional abaixo de 85% da tensão de sequência positiva,
+   saturando no ajuste padrão V1 = 0,5 pu. Coincide com VP1 e VP2 do registro DEOL.
+   `Imax` é POR UNIDADE, multiplicado por NOP (manual: "3600 A x 25 unidades = 90 kA"),
+   e é ELE que dá a escala absoluta da injeção: a curva é normalizada (ΔIq/In de 0 a 1
+   entre VP2 e VP1) mas o valor injetado é `frac × Imax`. Onde o campo MVA está
+   preenchido, In = MVA/(√3·kV) fica ABAIXO de Imax — razão 1,50 no caso de referência —
+   e escalar por In subestima a injeção em exatamente Imax/In. Onde MVA está ausente o
+   manual manda tomar In = Imax e as duas leituras coincidem, o que explica o desvio
+   aparecer só nas poucas barras com MVA declarado.
+   Solução por Newton com o conversor linearizado como equivalente Norton (Haddadi,
+   Farantatos & Kocar, arXiv:2411.12006) — a iteração de ponto fixo com fonte de corrente
+   ideal cai em ciclo limite e não converge.
+
+   REFERÊNCIA DE ÂNGULO, DECIDIDA POR FONTE. Cada gerador resolve com o ângulo da PRÓPRIA
+   tensão convergida quando essa equação tem solução, e usa a tensão PRÉ-FALTA só quando
+   não tem — condição que ocorre com a fonte eletricamente colada ao ponto de falta, onde
+   Vth ≈ 0 e a equação exigiria ang(Zjj) = 90°. O ANAFAS declara qual usou no rótulo da
+   fonte, em relatório de contribuições: 'FON.CORRENTE' contra 'FON.COR.Vpre'. Aplicar o
+   fallback ao CONJUNTO, e não à fonte que precisa dele, produz erro de +29% nas barras
+   de complexo com reatância negativa encadeada.
+"""
+
+
+def orientacao(imprimir=True):
+    """Guia de uso: os dois modos, como escolher a tolerância e o que são as limitações.
+
+    Escrito para quem não acompanhou o desenvolvimento — inclusive agentes de IA operando
+    o motor a partir do código. Devolve o texto; com `imprimir=False`, apenas retorna.
+    """
+    if imprimir:
+        print(_ORIENTACAO)
+    return _ORIENTACAO
+
+
+# ===================== submódulos como espaços de nome =====================
+import types as _types
+curvas = _types.SimpleNamespace(CURVAS=CURVAS, CURVA_PADRAO=CURVA_PADRAO, NORMA_PADRAO=NORMA_PADRAO, constantes=constantes, descreve=descreve, tempo=tempo, tms_para_tempo=tms_para_tempo)
+sm211 = _types.SimpleNamespace(FUNCOES=FUNCOES, TEMPOS=TEMPOS, exige_stub=exige_stub, funcoes_exigidas=funcoes_exigidas, tempo_maximo=tempo_maximo, verificar_escopo=verificar_escopo)
+dados_externos = _types.SimpleNamespace(CATALOGO=CATALOGO, EXIGIDOS=EXIGIDOS, RELATORIO=RELATORIO, da_base=da_base, faltantes=faltantes)
+fluxo = _types.SimpleNamespace(SEM_LIMITE=SEM_LIMITE, aplicar_despacho=aplicar_despacho, balanco=balanco, carga_maxima=carga_maxima, carregamento=carregamento, corrente_nominal=corrente_nominal, curto_por_cenario=curto_por_cenario, envelope_cenarios=envelope_cenarios, fluxos=fluxos, tensao_barra=tensao_barra)
+
+__all__ = ['# parsers     "AnaModel', 'PwfModel', 'conciliar_bases', 'ler_relatorio', 'niveis_kA', 'impedancias_pu', '# motor de curto-circuito     "Solver', 'branches_at', '# motor de proteção     "recomposicao_87b', 'envelope_contribuicoes', 'tabela_envelope', 'impacto_entrada', 'relatorio_curto', 'relatorio_protecao', 'ajuste_sobrecorrente', 'CRITERIOS_SOBRECORRENTE', 'estudo_barra', 'CRITERIOS_BARRA', '# motor de fluxo de potência     "fluxo', '# apoio     "curvas', 'tempo', 'tms_para_tempo', 'CURVAS', 'dados_externos', 'sm211', 'orientacao', 'SB', 'num', 'zfin', 'zn3']

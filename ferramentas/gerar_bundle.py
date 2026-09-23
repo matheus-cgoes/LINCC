@@ -9,6 +9,7 @@ pacote — sempre corrija no pacote e regenere, nunca o contrário.
 from __future__ import annotations
 
 import argparse
+import re
 import pathlib
 
 RAIZ = pathlib.Path(__file__).resolve().parent.parent
@@ -57,6 +58,14 @@ def corpo(texto: str) -> str:
     for ln in linhas[i:]:
         if ln.startswith(("import ", "from ")):
             continue
+        s = ln.lstrip()
+        if s.startswith("from .") or s.startswith("from . import"):
+            ind = ln[:len(ln) - len(s)]
+            # no arquivo único todos os nomes são globais; o alias de submódulo aponta
+            # para o espaço de nome equivalente criado no rodapé
+            m = re.match(r"from \. import (\w+) as (\w+)", s)
+            saida.append(f"{ind}{m.group(2)} = {m.group(1)}" if m else f"{ind}pass")
+            continue
         if ln.startswith("SB = 100.0"):
             continue
         saida.append(ln)
@@ -69,8 +78,42 @@ def main() -> int:
     ap.add_argument("-o", "--saida", default=str(RAIZ / "lincc_bundle.py"))
     args = ap.parse_args()
 
+    init = (PKG / "__init__.py").read_text(encoding="utf-8")
+    doc = init.split('"""')[1]
+    cabecalho = ('"""' + doc.rstrip() + """
+
+ARQUIVO ÚNICO. Gerado por ferramentas/gerar_bundle.py a partir de src/lincc/ — não editar
+à mão. Aqui todos os nomes do pacote são globais: use `import lincc_bundle as lincc` e as
+chamadas documentadas acima valem como estão, inclusive lincc.fluxo.*, lincc.curvas.*,
+lincc.sm211.* e lincc.dados_externos.*. Requer apenas numpy e scipy.
+\"\"\"
+""".replace('\\"', '"') + CABECALHO.split('"""', 2)[2])
+    ini = init.index("_ORIENTACAO = ")
+    fim = init.index("\n", init.index("def orientacao"))
+    corpo_orient = init[ini:]
+    # até o fim da função orientacao (próximo bloco de topo ou fim do arquivo)
+    linhas_o = corpo_orient.split("\n")
+    k = next(j for j, l in enumerate(linhas_o) if l.startswith("def orientacao"))
+    j = k + 1
+    while j < len(linhas_o) and (linhas_o[j].startswith((" ", "\t")) or not linhas_o[j].strip()):
+        j += 1
+    orient = "\n".join(linhas_o[:j])
+    todos = re.search(r"__all__ = \[(.*?)\]", init, re.S).group(1)
+    nomes = [x.strip().strip('"\'') for x in todos.replace("\n", " ").split(",") if x.strip()]
+
+    def publicos(mod):
+        fonte = (PKG / f"{mod}.py").read_text(encoding="utf-8")
+        return sorted(set(re.findall(r"^def ([a-zA-Z]\w*)", fonte, re.M)) |
+                      set(re.findall(r"^([A-Z][A-Z_0-9]+) =", fonte, re.M)))
+    ns = ["", "# ===================== submódulos como espaços de nome =====================",
+          "import types as _types"]
+    for mod in ("curvas", "sm211", "dados_externos", "fluxo"):
+        itens = ", ".join(f"{p}={p}" for p in publicos(mod))
+        ns.append(f"{mod} = _types.SimpleNamespace({itens})")
+    rodape = "\n".join(ns) + "\n\n__all__ = " + repr(nomes) + "\n"
+
     partes = [
-        CABECALHO,
+        cabecalho,
         "\n# ===================== helpers de leitura =====================\n",
         corpo((PKG / "_base.py").read_text(encoding="utf-8")),
         "\n\n# ===================== parser do .ANA =====================\n",
@@ -89,7 +132,9 @@ def main() -> int:
         corpo((PKG / "sm211.py").read_text(encoding="utf-8")),
         "\n\n# ===================== dados externos =====================\n",
         corpo((PKG / "dados_externos.py").read_text(encoding="utf-8")),
-        RODAPE,
+        "\n\n# ===================== orientação para agentes =====================\n",
+        orient,
+        rodape,
     ]
     texto = "\n".join(partes)
     destino = pathlib.Path(args.saida)
