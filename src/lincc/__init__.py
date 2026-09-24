@@ -177,7 +177,8 @@ from .protecao import (recomposicao_87b,               # motor de proteção
                        envelope_contribuicoes, tabela_envelope,
                        impacto_entrada, relatorio_curto, relatorio_protecao,
                        ajuste_sobrecorrente, CRITERIOS_SOBRECORRENTE,
-                       estudo_barra, CRITERIOS_BARRA)
+                       estudo_barra, CRITERIOS_BARRA,
+                       SLOPE_87B_POR_FABRICANTE)
 
 __version__ = "0.3.0"
 __all__ = [
@@ -189,7 +190,7 @@ __all__ = [
     # motor de proteção
     "recomposicao_87b", "envelope_contribuicoes", "tabela_envelope",
     "impacto_entrada", "relatorio_curto", "relatorio_protecao",
-    "ajuste_sobrecorrente", "CRITERIOS_SOBRECORRENTE", "estudo_barra", "CRITERIOS_BARRA",
+    "ajuste_sobrecorrente", "CRITERIOS_SOBRECORRENTE", "estudo_barra", "CRITERIOS_BARRA", "SLOPE_87B_POR_FABRICANTE",
     # motor de fluxo de potência
     "fluxo",
     # apoio

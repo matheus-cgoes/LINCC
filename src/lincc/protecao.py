@@ -768,8 +768,21 @@ CRITERIOS_BARRA = dict(
     f_checkzone=0.80,    # checkzone: 80% do pickup do 87B
     f_alarme=0.15,       # alarme diferencial: 15% do pickup do 87B
     piso_in_tc=0.05,     # todo pickup acima de 5% de In do TC de referência
-    slope1=0.50, slope2=0.80, inflexao_in=(2.0, 3.0),   # valores de PARTIDA, não calculados
+    f_icc_max=0.80,      # teto: pickup abaixo de 80% da menor falta (guia REB670)
+    faixa_tc=(0.5, 1.5), # faixa típica do pickup: 50% a 150% de In do maior TC (guia REB670)
 )
+
+# Slope da diferencial de barra: parâmetro do IED, não do estudo. Cada fabricante define a
+# corrente de restrição e a característica de forma própria, e o mesmo percentual produz
+# curvas diferentes — por isso o LINCC informa a referência de cada um em vez de calcular.
+SLOPE_87B_POR_FABRICANTE = {
+    'SEL-487B': 'SLP1 60% (carga e falta interna) e SLP2 80% (modo de alta segurança, '
+                'comutado pela detecção de falta externa) — valores padrão do manual',
+    'Siemens 7SS85': 'fator de estabilização k ajustável de 0,10 a 0,80; limiar Idiff de '
+                     '0,20 a 4,00 × corrente nominal do objeto',
+    'ABB/Hitachi REB670': 'slope fixo em 53% no algoritmo; só o nível de operação é ajustado',
+    'GE MiCOM P74x': 'não verificado nesta revisão',
+}
 
 
 def _i_aberto(Z1, Z0, z1L, z0L, p, kind, Ib, f=1.0):
@@ -961,6 +974,14 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
         alertas87.append('carga de emergência acima do curto mínimo: prevalece o curto — '
                          'TC aberto no vão mais carregado pode provocar disparo')
     pk = aplica_piso(pk, alertas87)
+    if pk > crit['f_icc_max'] * icc_min:
+        alertas87.append(f"pickup acima de {crit['f_icc_max']:.0%} do curto mínimo "
+                         f"(teto recomendado pelo guia do REB670)")
+    if in_ref:
+        lo, hi = crit['faixa_tc']
+        if not (lo * float(in_ref) <= pk <= hi * float(in_ref)):
+            alertas87.append(f"pickup fora da faixa típica de {lo:.0%} a {hi:.0%} de In do "
+                             f"maior TC ({lo*float(in_ref):.0f} a {hi*float(in_ref):.0f} A)")
     if pk >= icc_min:
         alertas87.append('pickup não fica abaixo do curto mínimo: sensibilidade não garantida')
     funcoes['87B'] = dict(pickup=pk, faixa=(carga_max, icc_min), icc_min=icc_min,
@@ -975,8 +996,9 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
         aa.append(f'alarme acima da menor carga nominal dos vãos ({carga_min_nom:.0f} A): '
                   f'TC aberto nesse vão não será detectado')
     funcoes['alarme'] = dict(pickup=al, limite_superior=carga_min_nom, alertas=aa)
-    funcoes['slope'] = dict(slope1=crit['slope1'], slope2=crit['slope2'],
-                            inflexao_em_In_ref=crit['inflexao_in'], calculado=False)
+    funcoes['slope'] = dict(calculado=False, por_fabricante=dict(SLOPE_87B_POR_FABRICANTE),
+                            observacao='parâmetro do IED: seguir o manual do fabricante e o '
+                                       'estudo de saturação dos TCs')
 
     # --- 50BF e EFP por vão de linha ---
     bf, efp = {}, {}
@@ -1058,14 +1080,17 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
         f"50BF: acima da carga nominal do vão e abaixo da falta na extremidade oposta com o "
         f"terminal remoto aberto, na alimentação local mais fraca; sugerido "
         f"{crit['f_icc']:.0%} dessa corrente. Disparos sem corrente de falta (sobretensão, "
-        f"transferência) exigem lógica por contato do disjuntor",
+        f"transferência) exigem lógica por contato do disjuntor; se a sensibilidade exigir, o "
+        f"detector pode ficar abaixo da carga — a iniciação por disparo evita operação indevida",
         f"EFP: abaixo da falta junto ao disjuntor aberto, sugerido {crit['f_icc']:.0%}; lado "
         f"da linha alimentado pelo terminal remoto, lado da barra pela barra; sem piso de "
         f"carga; a posição real do TC define qual vale",
-        f"slope: valores de partida {crit['slope1']:.0%} e {crit['slope2']:.0%}, inflexão em "
-        f"{crit['inflexao_in'][0]:g} a {crit['inflexao_in'][1]:g} × In do TC de referência — "
-        f"não transferíveis entre fabricantes, dependem da definição de restrição do IED e "
-        f"do estudo de saturação",
+        "slope: parâmetro do IED, não calculado — SEL-487B 60%/80% com comutação por falta "
+        "externa, Siemens 7SS85 k de 0,10 a 0,80, REB670 fixo em 53%; os percentuais não são "
+        "transferíveis entre fabricantes",
+        f"87B: verificado o teto de {crit['f_icc_max']:.0%} do curto mínimo e, com o TC "
+        f"informado, a faixa típica de {crit['faixa_tc'][0]:.0%} a {crit['faixa_tc'][1]:.0%} "
+        f"de In do maior TC (guia do REB670)",
         'cargas por vão: ' + ('capacidades do ANAREDE (emergência e normal)' if cenarios
                               else 'potência nominal do .ANA; emergência não disponível'),
         'arranjo da subestação não informado: cargas por vão, sem composição por diagonal',

@@ -57,15 +57,41 @@ os dois; a escolha do modo e a curva de restrição seguem o manual do IED.
 
 ## Proteção de barra
 
-| Função | Critério |
-|---|---|
-| 87B | capacidade de emergência < pickup < curto mínimo; sugerido 67% do curto mínimo; sem faixa, prevalece o curto |
-| Checkzone | 80% do pickup do 87B |
-| Alarme | 15% do pickup do 87B, abaixo da menor capacidade nominal dos vãos — detecta TC aberto sem disparo |
-| 50BF | capacidade nominal < pickup < falta na extremidade oposta com remoto aberto, na alimentação local mais fraca |
-| EFP | abaixo da falta junto ao disjuntor aberto, nas duas posições de TC; sem piso de carga |
-| Todas | ≥ 5% de In do TC de referência (maior relação da zona), ou o ajuste mínimo do relé |
-| Slope | valores de partida 50% e 80%, inflexão em 2 a 3 × In de referência — não calculados |
+### O que os guias dos fabricantes estabelecem
+
+| Ponto | SEL-487B | Siemens 7SS85 | ABB/Hitachi REB670 | Classificação |
+|---|---|---|---|---|
+| Pickup da diferencial | O87P ajustável | Idiff de 0,20 a 4,00 × In do objeto [6] | em A primários; acima da carga máxima se a falta mínima permitir; abaixo de 80% da menor falta; típico 50% a 150% de In do maior TC [7] | **consenso** com o critério adotado |
+| Característica | duas inclinações, SLP1 60% e SLP2 80%, a segunda comutada pela detecção de falta externa [5] | fator k de 0,10 a 0,80 [6] | slope fixo em 53% [7] | **divergência**: parâmetro do IED |
+| Checkzone | — | independente de seccionadoras [6] | independente de seccionadoras; detecção de TC aberto dispensa checkzone adicional [7] | consenso quanto à independência; o nível segue o critério adotado |
+
+A consequência para o slope é direta: os percentuais **não são transferíveis** entre
+fabricantes. O LINCC não calcula slope e informa a referência de cada fabricante.
+
+### Critérios aplicados
+
+| Função | Critério | Origem |
+|---|---|---|
+| 87B | capacidade de emergência < pickup < curto mínimo; sugerido 67% do curto mínimo; sem faixa, prevalece o curto | critério do usuário, compatível com [7] |
+| 87B, teto | pickup ≤ 80% do curto mínimo | [7] |
+| 87B, faixa típica | 50% a 150% de In do maior TC, verificada quando o TC é informado | [7] |
+| Checkzone | 80% do pickup do 87B | critério do usuário |
+| Alarme | 15% do pickup do 87B, abaixo da menor capacidade nominal dos vãos — detecta TC aberto sem disparo | critério do usuário |
+| 50BF | capacidade nominal < pickup < falta na extremidade oposta com remoto aberto, na alimentação local mais fraca; prevalece a sensibilidade | critério do usuário, alinhado a [8] |
+| 50BF, disparos sem corrente de falta | lógica por contato do disjuntor | [9][10] |
+| EFP | abaixo da falta junto ao disjuntor aberto, nas duas posições de TC; sem piso de carga | critério do usuário |
+| Todas | ≥ 5% de In do TC de referência, ou o ajuste mínimo do relé | critério do usuário |
+| Slope | não calculado: parâmetro do IED | [5][6][7] |
+
+Sobre o 50BF, o guia da SEL registra o mesmo equilíbrio do critério adotado: idealmente o
+detector fica acima da carga máxima, mas pode ficar abaixo quando a sensibilidade exigir [8].
+A iniciação só por comando de disparo evita a operação indevida nesse caso. O guia da ABB
+prevê a detecção por corrente ou pelo sinal de disparo remanescente, e o redisparo [9].
+
+### Não verificado nesta revisão
+
+GE MiCOM P74x (barra) e os tempos de redisparo e de falha de disjuntor. Os tempos seguem o
+limite de 250 ms do Submódulo 2.11 até a revisão específica.
 
 ## Referências
 
@@ -76,3 +102,10 @@ exemplo de cálculo do fator k.
 técnicos.
 [4] SEL, *Implementing a 51V Voltage-Restrained Inverse-Time Overcurrent Element in the
 SEL-487E Relay*, nota de aplicação.
+[5] SEL, *SEL-487B Single-Phase Testing of the Differential Element*, guia de aplicação —
+valores padrão O87P, SLP1 e SLP2 e comutação para alta segurança.
+[6] Siemens, *SIPROTEC 5 7SS85 — Manual*, dados técnicos da proteção diferencial de barra.
+[7] ABB, *REB670 — Application Manual* e *Product Guide*, proteção diferencial de barra.
+[8] SEL, *Application Considerations for Local and Remote Breaker Failure Protection*.
+[9] ABB, *RET670 — Application Manual*, proteção de falha de disjuntor CCRBRF (50BF).
+[10] IEEE Std C37.119, *Guide for Breaker Failure Protection of Power Circuit Breakers*.

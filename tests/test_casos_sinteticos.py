@@ -720,3 +720,14 @@ def test_bus_voltage_segue_o_modo():
     S = Solver(M, modo="sincronas"); S.factor(avisar=False)
     v = S.bus_voltage(2, 1, "3F")
     assert v["modo"] == "sincronas" and 0 < v["Vff_min"] < 1
+
+
+def test_estudo_barra_slope_e_parametro_do_ied():
+    """Slope não é calculado: o estudo informa a referência de cada fabricante."""
+    from lincc import estudo_barra
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    r = estudo_barra(M, 2, dados={"in_tc_ref": 1000.0})
+    s = r["funcoes"]["slope"]
+    assert not s["calculado"] and "REB670" in " ".join(s["por_fabricante"])
+    assert r["funcoes"]["87B"]["pickup"] <= 0.8 * r["funcoes"]["87B"]["icc_min"] + 1e-9 \
+        or r["funcoes"]["87B"]["alertas"]
