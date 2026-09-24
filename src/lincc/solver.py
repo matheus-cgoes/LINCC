@@ -1148,17 +1148,50 @@ class Solver:
                     I1=abs(I1)*Ib*f,I2=abs(I2)*Ib*f,I0=abs(I0)*Ib*f,kV=kvb,
                     seqonly=(br['tipo']!='L'), modo=self._modo(modo), fator_fc=f)
 
-    def bus_voltage(self, fault_bus, obs_bus, kind='3F', Zf=0.0):
-        """Tensoes de fase (pu) numa barra observada durante uma falta em fault_bus.
-        Base para impedancia aparente de rele de distancia (Z_vista = V_rele/I_rele)."""
-        prof=self._seq_profile(fault_bus, kind, Zf)
-        if prof is None or obs_bus not in self.IDXP: return None
-        V1=prof['V1'][self.IDXP[obs_bus]]; V2=prof['V2'][self.IDXP[obs_bus]]
-        V0=prof['V0'][self.I0P[obs_bus]] if (prof['V0'] is not None and obs_bus in self.I0P) else 0j
-        a=np.exp(2j*np.pi/3)
-        Va=V0+V1+V2; Vb=V0+a*a*V1+a*V2; Vc=V0+a*V1+a*a*V2
-        return dict(Va=abs(Va),Vb=abs(Vb),Vc=abs(Vc),V1=abs(V1),V2=abs(V2),V0=abs(V0),
-                    Va_c=Va,V1_c=V1,V0_c=V0)
+    def bus_voltage(self, fault_bus, obs_bus, kind='3F', Zf=0.0, modo=None):
+        """Tensões de fase e fase-fase (pu) numa barra observada durante uma falta.
+
+        Segue o MODO da instância. No modo completo a sequência positiva vem do estado
+        convergido com as fontes de conversor — que sustentam a tensão durante a falta — e
+        as sequências negativa e zero vêm das correntes desse estado aplicadas às redes
+        passivas. Calcular em Thévenin puro subestima a tensão no relé, o que afeta
+        diretamente a verificação de 51V e a impedância aparente de distância.
+
+        Devolve módulos (Va, Vb, Vc, V1, V2, V0), fasores (Va_c, Vb_c, Vc_c, V1_c, V0_c) e
+        Vff_min — a menor tensão fase-fase, em pu da tensão fase-fase nominal.
+        """
+        prof = self._seq_profile(fault_bus, kind, Zf)
+        if prof is None or obs_bus not in self.IDXP:
+            return None
+        io = self.IDXP[obs_bus]
+        V1 = prof['V1'][io]; V2 = prof['V2'][io]
+        V0 = prof['V0'][self.I0P[obs_bus]] if (prof['V0'] is not None
+                                                 and obs_bus in self.I0P) else 0j
+        if self._modo(modo) == 'completo' and self._tem_fc():
+            self._exigir_validacao_completo()
+            Z1, Z2, Z0 = self.zth(fault_bus)
+            zf = complex(Zf)
+            if kind == '3F':
+                zeq, r2, r0 = zf, 0, 0
+            elif kind == '2F':
+                zeq, r2, r0 = Z2 + 2 * zf, -1, 0
+            elif kind == '1FT':
+                zeq, r2, r0 = Z2 + Z0 + 3 * zf, 1, 1
+            else:
+                z0f = Z0 + 3 * zf
+                zeq = Z2 * z0f / (Z2 + z0f)
+                r2, r0 = -z0f / (Z2 + z0f), -Z2 / (Z2 + z0f)
+            Vst, Ia1, _ = self._estado_fc_robusto(fault_bus, Zf=zeq)
+            V1 = Vst[io]
+            # redes passivas são lineares: escala a resposta de sequência pela corrente
+            V2 = prof['V2'][io] * (r2 * Ia1 / prof['Ia2']) if abs(prof['Ia2']) > 1e-12 else 0j
+            V0 = (V0 * (r0 * Ia1 / prof['Ia0']) if abs(prof['Ia0']) > 1e-12 else 0j)
+        a = np.exp(2j * np.pi / 3)
+        Va = V0 + V1 + V2; Vb = V0 + a * a * V1 + a * V2; Vc = V0 + a * V1 + a * a * V2
+        vff = min(abs(Va - Vb), abs(Vb - Vc), abs(Vc - Va)) / np.sqrt(3)
+        return dict(Va=abs(Va), Vb=abs(Vb), Vc=abs(Vc), V1=abs(V1), V2=abs(V2), V0=abs(V0),
+                    Va_c=Va, Vb_c=Vb, Vc_c=Vc, V1_c=V1, V0_c=V0, Vff_min=vff,
+                    modo=self._modo(modo))
 
     def line_end_open(self, bf, bt, nc, closed, kind='3F', p=1.0, Zf=0.0,
                       modo=None):

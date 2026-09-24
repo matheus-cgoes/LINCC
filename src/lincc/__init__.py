@@ -62,19 +62,25 @@ PROTOCOLO DE TRABALHO — vale para toda chamada, sem precisar ser repetido no p
    em linguagem de engenharia. Nenhum número deve chegar ao usuário sem as premissas que
    o produziram.
 
-5. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
+5. AJUSTE SE REFERE À CAPACIDADE, NUNCA AO FLUXO. Todo ajuste que possa limitar a
+   transmissão usa a capacidade do equipamento — de emergência quando declarada —, e não
+   o carregamento de um cenário. A proteção é do equipamento: ajustar abaixo da
+   capacidade limita o equipamento e pode atuar em contingência. O fluxo do ANAREDE é
+   informação, não base de ajuste. Critérios completos em docs/metodologia-protecao.md.
+
+6. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
    capacidade de interrupção e carga máxima operativa NÃO estão no .ANA. As funções de
    alto nível devolvem `dados_faltantes` com o que falta e o critério que cada item
    bloqueia — reporte a lista em vez de estimar.
 
-6. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
+7. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
    conectadas por conversor; 'sincronas' é o Thévenin puro. Perto dessas usinas a
    diferença passa de 40%. Não misture os dois num mesmo critério.
 
-7. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
+8. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
    primária do TC, não a do equipamento protegido.
 
-8. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
+9. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
    banco de três enrolamentos exige remover TODAS as pernas do nó-estrela; e se o
    equipamento novo já está na base, o cenário "antes" é o contrafactual — remova-o.
 
@@ -99,7 +105,10 @@ FUNÇÕES DE ALTO NÍVEL — resolvem o estudo inteiro numa chamada
     ajuste_sobrecorrente(M, tipo, elemento)   faixas admissíveis das funções de
                                               sobrecorrente (51, 50, SOTF, STUB, 67NT na
                                               linha; 51 e 50 no transformador) e se cada
-                                              uma é viável. NÃO escolhe o ajuste: devolve
+                                              uma é viável, com a 51V quando a falta
+                                              remota mínima fica abaixo do 51 (partida em
+                                              0,8 pu e verificação da tensão no relé).
+                                              NÃO escolhe o ajuste: devolve
                                               a faixa e o limite que governa. Faixa vazia
                                               significa função inviável — reporte, com o
                                               motivo, em vez de propor valor fora dela

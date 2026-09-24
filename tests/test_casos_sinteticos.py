@@ -693,3 +693,30 @@ def test_estudo_barra_aplica_os_criterios_e_declara_premissas():
     assert f["alarme"]["pickup"] >= 50.0                  # piso de 5% de In do TC
     assert not f["slope"]["calculado"]
     assert any("87B" in p for p in r["premissas"])
+
+
+def test_51v_transformador_quando_a_falta_remota_fica_abaixo_do_51():
+    """51V necessária quando a falta passante mínima fica abaixo de 1,5 × nominal."""
+    from lincc import ajuste_sobrecorrente
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    t = next(b for b in M.branches if b["tipo"] == "T")
+    elem = (t["bf"], t["bt"], t["nc"])
+    folgado = ajuste_sobrecorrente(M, "transformador", elem, dados={"in_nominal": 1.0},
+                                   modo="sincronas")
+    assert not folgado["funcoes"]["51V"]["necessaria"]
+    apertado = ajuste_sobrecorrente(M, "transformador", elem, dados={"in_nominal": 1e5},
+                                    modo="sincronas")
+    v = apertado["funcoes"]["51V"]
+    assert v["necessaria"] and v["v_partida"] == pytest.approx(0.80)
+    assert v["k"] == pytest.approx(v["i_falta_remota_min"] / (1.2 * v["pickup_51"]))
+    assert v["pickup_51V"] < v["i_falta_remota_min"]
+    assert v["v_rele_na_falta"] is not None
+    assert any("51V" in p for p in apertado["premissas"])
+
+
+def test_bus_voltage_segue_o_modo():
+    """Tensão no relé durante a falta segue o modo da instância."""
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    S = Solver(M, modo="sincronas"); S.factor(avisar=False)
+    v = S.bus_voltage(2, 1, "3F")
+    assert v["modo"] == "sincronas" and 0 < v["Vff_min"] < 1

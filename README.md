@@ -97,6 +97,12 @@ de equipamento e terminal remoto aberto — com o cenário em que cada extremo o
 **Faixas de ajuste de sobrecorrente**, com a verificação de viabilidade de cada função —
 temporizada, instantânea, fechamento sob falta, proteção de trecho e direcional de terra —
 e o limite que governa. Quando uma função não tem faixa possível, o relatório diz por quê.
+Se a falta no terminal oposto não alcança o ajuste temporizado, a sobrecorrente com
+restrição de tensão é dimensionada, com a verificação de que a tensão no relé cai o
+suficiente para sensibilizá-la.
+
+Todo ajuste que pode limitar a transmissão é referido à **capacidade** do equipamento, e não
+ao carregamento de um cenário: a proteção é do equipamento.
 
 **Insumos de ajuste** de proteção: impedâncias e fator de compensação para distância,
 corrente passante para diferencial de transformador, corrente mínima de recomposição para
@@ -139,6 +145,7 @@ Python 3.10+, com `numpy` e `scipy`.
 | | Para quem |
 |---|---|
 | [`examples/prompt-demonstracao.md`](examples/prompt-demonstracao.md) | Quem vai usar: exemplo completo |
+| [`docs/metodologia-protecao.md`](docs/metodologia-protecao.md) | Critérios de ajuste de cada função e suas fontes |
 | [`docs/uso.md`](docs/uso.md) | Quem vai programar: operação, modos, limitações e API |
 | [`docs/arquitetura.md`](docs/arquitetura.md) | Organização dos módulos |
 | [`docs/formato-ana.md`](docs/formato-ana.md) | Convenções do formato `.ANA` |

@@ -478,7 +478,60 @@ CRITERIOS_SOBRECORRENTE = {
         f51_nominal=1.50,      # pickup do 51: 150% da nominal
         f50_margem=1.20,       # 50 acima do passa-através e do inrush com essa margem
     ),
+    # 51V — comum a linha e transformador
+    '51V': dict(
+        v_partida=0.80,        # tensão de partida, pu da fase-fase nominal
+        margem_k=1.20,         # k·I> ≤ falta remota mínima / margem (guia MiCOM P14x)
+    ),
 }
+
+
+def _avaliar_51v(S, bus_rele, pickup51, faltas, crit51v, prem):
+    """Verifica a necessidade da 51V e calcula o fator de redução.
+
+    `faltas`: [(corrente_A, barra_em_falta, tipo), ...] para as faltas remotas que o 51
+    deve enxergar. A 51V é necessária quando a menor delas fica abaixo do pickup do 51 —
+    a impedância do equipamento limita a corrente de falta a níveis de carga, e só a
+    tensão distingue as duas situações.
+
+    Ajuste, conforme os guias de aplicação (Siemens 7SR, MiCOM P14x, Relion PHPVOC/
+    VRPVOC, SEL): o pickup normal permanece acima da carga; abaixo da tensão de partida
+    ele é reduzido pelo fator k, com k·I> abaixo da falta remota mínima com margem. A
+    tensão no relé durante essa falta precisa ficar abaixo da tensão de partida — senão a
+    51V não se sensibiliza e a proteção fica sem cobertura.
+    """
+    faltas = [f for f in faltas if f[0]]
+    if not pickup51 or not faltas:
+        return None
+    imin, fbus, fk = min(faltas)
+    out = dict(necessaria=imin < pickup51, i_falta_remota_min=imin,
+               condicao=f'falta {fk} na barra {fbus}', pickup_51=pickup51)
+    if not out['necessaria']:
+        out['conclusao'] = '51 enxerga a falta remota mínima; 51V dispensável'
+        return out
+    k = imin / (crit51v['margem_k'] * pickup51)
+    try:
+        v = S.bus_voltage(fbus, bus_rele, fk)
+        vrele = v['Vff_min'] if v else None
+    except Exception:
+        vrele = None
+    out.update(v_partida=crit51v['v_partida'], k=k, pickup_51V=k * pickup51,
+               v_rele_na_falta=vrele, alertas=[])
+    if vrele is None:
+        out['alertas'].append('tensão no relé durante a falta não calculada')
+    elif vrele >= crit51v['v_partida']:
+        out['alertas'].append(
+            f'tensão no relé na falta remota mínima ({vrele:.3f} pu) não cai abaixo da '
+            f'partida ({crit51v["v_partida"]:.2f} pu): a 51V não se sensibiliza')
+    if k < 0.1:
+        out['alertas'].append(f'fator k = {k:.2f} abaixo da faixa usual dos relés')
+    prem.append(f"51V: necessária quando a falta remota mínima fica abaixo do pickup do 51; "
+                f"partida em {crit51v['v_partida']:.2f} pu da tensão fase-fase; pickup "
+                f"reduzido por k com k·I> ≤ falta remota mínima / {crit51v['margem_k']:.1f}; "
+                f"bloqueio por falha de fusível do TP; tensão no relé verificada no modo do "
+                f"estudo")
+    return out
+
 
 
 def _faixa(minimo, maximo):
@@ -582,6 +635,13 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
             except ValueError as e:
                 f51['aviso'] = str(e)
         out['funcoes']['51'] = f51
+        c51v = dict(CRITERIOS_SOBRECORRENTE['51V']); c51v.update(
+            {k[4:]: v for k, v in (criterios or {}).items() if k.startswith('51V_')})
+        faltas = [(i_barra_remota.get(k), bt, k) for k in ('3F', '2F')]
+        faltas += [(i_leo.get(k), bt, k) for k in ('3F', '2F')]
+        r51v = _avaliar_51v(S, bf, pk, faltas, c51v, prem)
+        if r51v:
+            out['funcoes']['51V'] = r51v
 
         # --- 50: só se seletivo para falta na barra remota ---
         i_remota_max = max(v for v in i_barra_remota.values() if v)
@@ -635,6 +695,13 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
         inom = dados.get('in_nominal')
         if inom in (None, ''):
             falta('in_nominal')
+        if cenarios and 'in_nominal' in da_caso:
+            from .fluxo import carga_maxima
+            cm = carga_maxima(cenarios, bf, bt, nc)
+            if cm and cm.get('cap_normal_A'):
+                inom = cm['cap_normal_A']
+                prem.append('corrente nominal do transformador: capacidade normal declarada '
+                            'no ANAREDE')
         out['funcoes']['51'] = dict(
             pickup=crit['f51_nominal'] * float(inom) if inom else None,
             criterio=f"{crit['f51_nominal']:.0%} da nominal")
@@ -658,6 +725,19 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
             if pernas:
                 outro = max(pernas, key=lambda b: model.bus_kv.get(b, 0))
         out['barra_outro_lado'] = outro
+        pk51 = out['funcoes']['51']['pickup']
+        c51v = dict(CRITERIOS_SOBRECORRENTE['51V']); c51v.update(
+            {k[4:]: v for k, v in (criterios or {}).items() if k.startswith('51V_')})
+        faltas = []
+        for k in ('3F', '2F'):
+            try:
+                r = S.branch_current(outro, bf, bt, nc, k)
+                faltas.append((kA(r['Imax']) if r else None, outro, k))
+            except Exception:
+                pass
+        r51v = _avaliar_51v(S, bf, pk51, faltas, c51v, prem)
+        if r51v:
+            out['funcoes']['51V'] = r51v
         try:
             r = S.branch_current(outro, bf, bt, nc, '3F')
             passa = r['Imax'] if r else None

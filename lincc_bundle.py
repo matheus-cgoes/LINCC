@@ -62,19 +62,25 @@ PROTOCOLO DE TRABALHO — vale para toda chamada, sem precisar ser repetido no p
    em linguagem de engenharia. Nenhum número deve chegar ao usuário sem as premissas que
    o produziram.
 
-5. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
+5. AJUSTE SE REFERE À CAPACIDADE, NUNCA AO FLUXO. Todo ajuste que possa limitar a
+   transmissão usa a capacidade do equipamento — de emergência quando declarada —, e não
+   o carregamento de um cenário. A proteção é do equipamento: ajustar abaixo da
+   capacidade limita o equipamento e pode atuar em contingência. O fluxo do ANAREDE é
+   informação, não base de ajuste. Critérios completos em docs/metodologia-protecao.md.
+
+6. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
    capacidade de interrupção e carga máxima operativa NÃO estão no .ANA. As funções de
    alto nível devolvem `dados_faltantes` com o que falta e o critério que cada item
    bloqueia — reporte a lista em vez de estimar.
 
-6. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
+7. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
    conectadas por conversor; 'sincronas' é o Thévenin puro. Perto dessas usinas a
    diferença passa de 40%. Não misture os dois num mesmo critério.
 
-7. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
+8. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
    primária do TC, não a do equipamento protegido.
 
-8. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
+9. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
    banco de três enrolamentos exige remover TODAS as pernas do nó-estrela; e se o
    equipamento novo já está na base, o cenário "antes" é o contrafactual — remova-o.
 
@@ -99,7 +105,10 @@ FUNÇÕES DE ALTO NÍVEL — resolvem o estudo inteiro numa chamada
     ajuste_sobrecorrente(M, tipo, elemento)   faixas admissíveis das funções de
                                               sobrecorrente (51, 50, SOTF, STUB, 67NT na
                                               linha; 51 e 50 no transformador) e se cada
-                                              uma é viável. NÃO escolhe o ajuste: devolve
+                                              uma é viável, com a 51V quando a falta
+                                              remota mínima fica abaixo do 51 (partida em
+                                              0,8 pu e verificação da tensão no relé).
+                                              NÃO escolhe o ajuste: devolve
                                               a faixa e o limite que governa. Faixa vazia
                                               significa função inviável — reporte, com o
                                               motivo, em vez de propor valor fora dela
@@ -1893,17 +1902,50 @@ class Solver:
                     I1=abs(I1)*Ib*f,I2=abs(I2)*Ib*f,I0=abs(I0)*Ib*f,kV=kvb,
                     seqonly=(br['tipo']!='L'), modo=self._modo(modo), fator_fc=f)
 
-    def bus_voltage(self, fault_bus, obs_bus, kind='3F', Zf=0.0):
-        """Tensoes de fase (pu) numa barra observada durante uma falta em fault_bus.
-        Base para impedancia aparente de rele de distancia (Z_vista = V_rele/I_rele)."""
-        prof=self._seq_profile(fault_bus, kind, Zf)
-        if prof is None or obs_bus not in self.IDXP: return None
-        V1=prof['V1'][self.IDXP[obs_bus]]; V2=prof['V2'][self.IDXP[obs_bus]]
-        V0=prof['V0'][self.I0P[obs_bus]] if (prof['V0'] is not None and obs_bus in self.I0P) else 0j
-        a=np.exp(2j*np.pi/3)
-        Va=V0+V1+V2; Vb=V0+a*a*V1+a*V2; Vc=V0+a*V1+a*a*V2
-        return dict(Va=abs(Va),Vb=abs(Vb),Vc=abs(Vc),V1=abs(V1),V2=abs(V2),V0=abs(V0),
-                    Va_c=Va,V1_c=V1,V0_c=V0)
+    def bus_voltage(self, fault_bus, obs_bus, kind='3F', Zf=0.0, modo=None):
+        """Tensões de fase e fase-fase (pu) numa barra observada durante uma falta.
+
+        Segue o MODO da instância. No modo completo a sequência positiva vem do estado
+        convergido com as fontes de conversor — que sustentam a tensão durante a falta — e
+        as sequências negativa e zero vêm das correntes desse estado aplicadas às redes
+        passivas. Calcular em Thévenin puro subestima a tensão no relé, o que afeta
+        diretamente a verificação de 51V e a impedância aparente de distância.
+
+        Devolve módulos (Va, Vb, Vc, V1, V2, V0), fasores (Va_c, Vb_c, Vc_c, V1_c, V0_c) e
+        Vff_min — a menor tensão fase-fase, em pu da tensão fase-fase nominal.
+        """
+        prof = self._seq_profile(fault_bus, kind, Zf)
+        if prof is None or obs_bus not in self.IDXP:
+            return None
+        io = self.IDXP[obs_bus]
+        V1 = prof['V1'][io]; V2 = prof['V2'][io]
+        V0 = prof['V0'][self.I0P[obs_bus]] if (prof['V0'] is not None
+                                                 and obs_bus in self.I0P) else 0j
+        if self._modo(modo) == 'completo' and self._tem_fc():
+            self._exigir_validacao_completo()
+            Z1, Z2, Z0 = self.zth(fault_bus)
+            zf = complex(Zf)
+            if kind == '3F':
+                zeq, r2, r0 = zf, 0, 0
+            elif kind == '2F':
+                zeq, r2, r0 = Z2 + 2 * zf, -1, 0
+            elif kind == '1FT':
+                zeq, r2, r0 = Z2 + Z0 + 3 * zf, 1, 1
+            else:
+                z0f = Z0 + 3 * zf
+                zeq = Z2 * z0f / (Z2 + z0f)
+                r2, r0 = -z0f / (Z2 + z0f), -Z2 / (Z2 + z0f)
+            Vst, Ia1, _ = self._estado_fc_robusto(fault_bus, Zf=zeq)
+            V1 = Vst[io]
+            # redes passivas são lineares: escala a resposta de sequência pela corrente
+            V2 = prof['V2'][io] * (r2 * Ia1 / prof['Ia2']) if abs(prof['Ia2']) > 1e-12 else 0j
+            V0 = (V0 * (r0 * Ia1 / prof['Ia0']) if abs(prof['Ia0']) > 1e-12 else 0j)
+        a = np.exp(2j * np.pi / 3)
+        Va = V0 + V1 + V2; Vb = V0 + a * a * V1 + a * V2; Vc = V0 + a * V1 + a * a * V2
+        vff = min(abs(Va - Vb), abs(Vb - Vc), abs(Vc - Va)) / np.sqrt(3)
+        return dict(Va=abs(Va), Vb=abs(Vb), Vc=abs(Vc), V1=abs(V1), V2=abs(V2), V0=abs(V0),
+                    Va_c=Va, Vb_c=Vb, Vc_c=Vc, V1_c=V1, V0_c=V0, Vff_min=vff,
+                    modo=self._modo(modo))
 
     def line_end_open(self, bf, bt, nc, closed, kind='3F', p=1.0, Zf=0.0,
                       modo=None):
@@ -2831,7 +2873,60 @@ CRITERIOS_SOBRECORRENTE = {
         f51_nominal=1.50,      # pickup do 51: 150% da nominal
         f50_margem=1.20,       # 50 acima do passa-através e do inrush com essa margem
     ),
+    # 51V — comum a linha e transformador
+    '51V': dict(
+        v_partida=0.80,        # tensão de partida, pu da fase-fase nominal
+        margem_k=1.20,         # k·I> ≤ falta remota mínima / margem (guia MiCOM P14x)
+    ),
 }
+
+
+def _avaliar_51v(S, bus_rele, pickup51, faltas, crit51v, prem):
+    """Verifica a necessidade da 51V e calcula o fator de redução.
+
+    `faltas`: [(corrente_A, barra_em_falta, tipo), ...] para as faltas remotas que o 51
+    deve enxergar. A 51V é necessária quando a menor delas fica abaixo do pickup do 51 —
+    a impedância do equipamento limita a corrente de falta a níveis de carga, e só a
+    tensão distingue as duas situações.
+
+    Ajuste, conforme os guias de aplicação (Siemens 7SR, MiCOM P14x, Relion PHPVOC/
+    VRPVOC, SEL): o pickup normal permanece acima da carga; abaixo da tensão de partida
+    ele é reduzido pelo fator k, com k·I> abaixo da falta remota mínima com margem. A
+    tensão no relé durante essa falta precisa ficar abaixo da tensão de partida — senão a
+    51V não se sensibiliza e a proteção fica sem cobertura.
+    """
+    faltas = [f for f in faltas if f[0]]
+    if not pickup51 or not faltas:
+        return None
+    imin, fbus, fk = min(faltas)
+    out = dict(necessaria=imin < pickup51, i_falta_remota_min=imin,
+               condicao=f'falta {fk} na barra {fbus}', pickup_51=pickup51)
+    if not out['necessaria']:
+        out['conclusao'] = '51 enxerga a falta remota mínima; 51V dispensável'
+        return out
+    k = imin / (crit51v['margem_k'] * pickup51)
+    try:
+        v = S.bus_voltage(fbus, bus_rele, fk)
+        vrele = v['Vff_min'] if v else None
+    except Exception:
+        vrele = None
+    out.update(v_partida=crit51v['v_partida'], k=k, pickup_51V=k * pickup51,
+               v_rele_na_falta=vrele, alertas=[])
+    if vrele is None:
+        out['alertas'].append('tensão no relé durante a falta não calculada')
+    elif vrele >= crit51v['v_partida']:
+        out['alertas'].append(
+            f'tensão no relé na falta remota mínima ({vrele:.3f} pu) não cai abaixo da '
+            f'partida ({crit51v["v_partida"]:.2f} pu): a 51V não se sensibiliza')
+    if k < 0.1:
+        out['alertas'].append(f'fator k = {k:.2f} abaixo da faixa usual dos relés')
+    prem.append(f"51V: necessária quando a falta remota mínima fica abaixo do pickup do 51; "
+                f"partida em {crit51v['v_partida']:.2f} pu da tensão fase-fase; pickup "
+                f"reduzido por k com k·I> ≤ falta remota mínima / {crit51v['margem_k']:.1f}; "
+                f"bloqueio por falha de fusível do TP; tensão no relé verificada no modo do "
+                f"estudo")
+    return out
+
 
 
 def _faixa(minimo, maximo):
@@ -2935,6 +3030,13 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
             except ValueError as e:
                 f51['aviso'] = str(e)
         out['funcoes']['51'] = f51
+        c51v = dict(CRITERIOS_SOBRECORRENTE['51V']); c51v.update(
+            {k[4:]: v for k, v in (criterios or {}).items() if k.startswith('51V_')})
+        faltas = [(i_barra_remota.get(k), bt, k) for k in ('3F', '2F')]
+        faltas += [(i_leo.get(k), bt, k) for k in ('3F', '2F')]
+        r51v = _avaliar_51v(S, bf, pk, faltas, c51v, prem)
+        if r51v:
+            out['funcoes']['51V'] = r51v
 
         # --- 50: só se seletivo para falta na barra remota ---
         i_remota_max = max(v for v in i_barra_remota.values() if v)
@@ -2988,6 +3090,13 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
         inom = dados.get('in_nominal')
         if inom in (None, ''):
             falta('in_nominal')
+        if cenarios and 'in_nominal' in da_caso:
+            pass
+            cm = carga_maxima(cenarios, bf, bt, nc)
+            if cm and cm.get('cap_normal_A'):
+                inom = cm['cap_normal_A']
+                prem.append('corrente nominal do transformador: capacidade normal declarada '
+                            'no ANAREDE')
         out['funcoes']['51'] = dict(
             pickup=crit['f51_nominal'] * float(inom) if inom else None,
             criterio=f"{crit['f51_nominal']:.0%} da nominal")
@@ -3011,6 +3120,19 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
             if pernas:
                 outro = max(pernas, key=lambda b: model.bus_kv.get(b, 0))
         out['barra_outro_lado'] = outro
+        pk51 = out['funcoes']['51']['pickup']
+        c51v = dict(CRITERIOS_SOBRECORRENTE['51V']); c51v.update(
+            {k[4:]: v for k, v in (criterios or {}).items() if k.startswith('51V_')})
+        faltas = []
+        for k in ('3F', '2F'):
+            try:
+                r = S.branch_current(outro, bf, bt, nc, k)
+                faltas.append((kA(r['Imax']) if r else None, outro, k))
+            except Exception:
+                pass
+        r51v = _avaliar_51v(S, bf, pk51, faltas, c51v, prem)
+        if r51v:
+            out['funcoes']['51V'] = r51v
         try:
             r = S.branch_current(outro, bf, bt, nc, '3F')
             passa = r['Imax'] if r else None
