@@ -68,19 +68,31 @@ PROTOCOLO DE TRABALHO — vale para toda chamada, sem precisar ser repetido no p
    capacidade limita o equipamento e pode atuar em contingência. O fluxo do ANAREDE é
    informação, não base de ajuste. Critérios completos em docs/metodologia-protecao.md.
 
-6. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
+6. REPORTE ESTADO E FALHAS. Cada função de ajuste traz `estado` —
+   calculavel_verificada, faixa_inviavel, dados_faltantes, modelo_nao_suportado,
+   validacao_pendente ou erro_execucao — e os estudos trazem `falhas`. Apresente o estado
+   de cada item ao usuário; nunca mostre faixa sem estado nem omita uma falha. Um resultado
+   em validacao_pendente não é resultado aprovado.
+
+7. CRITÉRIOS DO USUÁRIO VÊM DO PEDIDO. Múltiplos de carga, escalas entre funções e
+   margens de filosofia não têm padrão no código: se o usuário os informar, passe-os em
+   `criterios`; se não, apresente a faixa admissível e diga que o critério falta. Ajuste
+   de relé só é exportável com perfil de IED documentado (`perfil_ied`); sem ele, o
+   resultado é insumo de estudo — diga isso ao usuário.
+
+8. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
    capacidade de interrupção e carga máxima operativa NÃO estão no .ANA. As funções de
    alto nível devolvem `dados_faltantes` com o que falta e o critério que cada item
    bloqueia — reporte a lista em vez de estimar.
 
-7. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
+9. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
    conectadas por conversor; 'sincronas' é o Thévenin puro. Perto dessas usinas a
    diferença passa de 40%. Não misture os dois num mesmo critério.
 
-8. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
+10. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
    primária do TC, não a do equipamento protegido.
 
-9. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
+11. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
    banco de três enrolamentos exige remover TODAS as pernas do nó-estrela; e se o
    equipamento novo já está na base, o cenário "antes" é o contrafactual — remova-o.
 
@@ -367,7 +379,9 @@ class AnaModel:
                 _cn,rn,xn = self._lado_equip(ln, bff, btt)
                 self.zig.append(dict(bus=btt if btt else bff, X0=X0, R0=R0, rn=rn, xn=xn))
             elif tipo == 'S':
-                self.caps.append(dict(bf=bff, bt=btt, X1=X1, X0=X0))
+                # identidade do banco: circuito na mesma coluna dos demais ramos
+                self.caps.append(dict(bf=bff, bt=btt, nc=ln[14:16].strip() or '1',
+                                      tipo='S', X1=X1, X0=X0))
             elif tipo == 'L':
                 cd,cp = self._conns(ln)
                 self.branches.append(dict(tipo='L', bf=bff, bt=btt, nc=ln[14:16].strip(),
@@ -779,7 +793,7 @@ class Solver:
     def __init__(self, model, drop_branches=None, drop_gens=None, block_btb=True,
                  dispatch_file=None,   # despacho inferido OBSOLETO: estados do DBAR ('d') cobrem o caso
                  charging=False, modo='completo', manter_reatores=None,
-                 drop_reatores_barra=None):
+                 drop_reatores_barra=None, bypass_capacitores=None):
         """`charging`: representar a capacitância de linha (campos S1 e S0), em π.
 
         PADRÃO DESLIGADO, e a razão é medida. O relatório de impedâncias de barra do
@@ -805,6 +819,12 @@ class Solver:
         # Barras cujos reatores de barra estão desligados no cenário — o reator é um vão
         # da subestação e sai, por exemplo, na recomposição por um só elemento.
         self.dropH = set(drop_reatores_barra or [])
+        # Capacitor série tem dois estados físicos distintos: em drop_branches o banco sai e
+        # o circuito ABRE; em bypass_capacitores o banco é curto-circuitado e a linha segue
+        # contínua sem a compensação. São cenários diferentes e não se confundem.
+        self.bypassC = {(a, b, str(c)) for a, b, c in (bypass_capacitores or [])}
+        self.block_btb_arg = block_btb
+        self.dropG_arg = drop_gens
         if modo not in ('sincronas', 'completo'):
             raise ValueError(f"modo deve ser 'sincronas' ou 'completo', recebido {modo!r}")
         # Modo global da instância: toda grandeza calculada por este Solver segue este
@@ -904,7 +924,10 @@ class Solver:
         for c in self.M.caps:
             bf,bt=c['bf'],c['bt']
             if bf not in IDX or bt not in IDX: continue
+            kc=(bf,bt,str(c.get('nc','1'))); kr=(bt,bf,kc[2])
+            if kc in self.dropB or kr in self.dropB: continue      # banco aberto
             x=(c['X1'] or 0)/100
+            if kc in self.bypassC or kr in self.bypassC: x=1e-6   # banco em bypass
             if abs(x)<1e-12 or not np.isfinite(x): continue
             i,j=IDX[bf],IDX[bt]; ys=1/(1j*x)
             YP[i,j]-=ys; YP[j,i]-=ys; YP[i,i]+=ys; YP[j,j]+=ys
@@ -1031,7 +1054,10 @@ class Solver:
         for c in M.caps:
             bf,bt=c['bf'],c['bt']
             if bf not in IDX0 or bt not in IDX0: continue
+            kc=(bf,bt,str(c.get('nc','1'))); kr=(bt,bf,kc[2])
+            if kc in self.dropB or kr in self.dropB: continue      # banco aberto
             x=(c['X0'] or 0)/100
+            if kc in self.bypassC or kr in self.bypassC: x=1e-6   # banco em bypass
             if abs(x)<1e-12 or not np.isfinite(x): continue
             i,j=IDX0[bf],IDX0[bt]; ys=1/(1j*x)
             Y[i,j]-=ys; Y[j,i]-=ys; Y[i,i]+=ys; Y[j,j]+=ys
@@ -1142,6 +1168,7 @@ class Solver:
         grupos={}
         for kseg in par: grupos.setdefault(find(kseg),[]).append(kseg)
         gmax=0
+        self._gmut={}; self._Zseg=dict(Zseg)
         for segs in grupos.values():
             n=len(segs); gmax=max(gmax,n)
             idx={s:i for i,s in enumerate(segs)}
@@ -1154,6 +1181,9 @@ class Solver:
                 Yp=np.linalg.inv(Zp)
             except np.linalg.LinAlgError:
                 continue
+            g=(segs, idx, Yp, seg_nodes)       # referência compartilhada, sem cópia por segmento
+            for s in segs:
+                self._gmut[s]=g
             dY=Yp.copy()
             for s in segs: dY[idx[s],idx[s]]-=1/seg_z[s]
             nod=[(IDX0[seg_nodes[s][0]],IDX0[seg_nodes[s][1]]) for s in segs]
@@ -1242,6 +1272,13 @@ class Solver:
         Z1,Z2,Z0=self.zth(bus)
         if Z1 is None: return None
         zf=complex(Zf)
+        den={'3F':Z1+zf,'2F':Z1+Z2+2*zf,
+             '1FT':(Z1+Z2+Z0+3*zf) if Z0 is not None else None}.get(kind)
+        if den is not None and (abs(den)<1e-12 or not np.isfinite(den)):
+            # impedância equivalente nula ou indefinida: ressonância no modelo ou curto
+            # franco já presente. Um valor infinito ou nulo não é resultado válido.
+            raise ValueError(f"falta {kind} em {bus}: impedância equivalente nula ou "
+                             f"indefinida (ressonância série no modelo?)")
         if kind=='3F':
             I=abs(Vf/(Z1+zf))
         elif kind=='1FT':
@@ -1490,10 +1527,15 @@ class Solver:
         if cache is None:
             todas = sorted({self.IDXP[b] for b in self._fc_sources() if b in self.IDXP})
             N = len(self.BLP)
-            E = np.zeros((N, len(todas)), dtype=complex)
-            for c, j in enumerate(todas):
-                E[j, c] = 1
-            Z = self.luP.solve(E)[todas, :]
+            n = len(todas)
+            Z = np.empty((n, n), dtype=complex)
+            BLOCO = 32      # resolve em blocos: a coluna completa tem N linhas, só n interessam
+            for c0 in range(0, n, BLOCO):
+                cols = todas[c0:c0 + BLOCO]
+                E = np.zeros((N, len(cols)), dtype=complex)
+                for c, j in enumerate(cols):
+                    E[j, c] = 1
+                Z[:, c0:c0 + len(cols)] = self.luP.solve(E)[todas, :]
             cache = self._zfontes = ({j: c for c, j in enumerate(todas)}, Z)
         pos, Z = cache
         sel = [pos[j] for j in idxs]
@@ -1863,83 +1905,219 @@ class Solver:
         V0=(-Z0col*Ia0) if (Z0col is not None and Ia0!=0) else None
         return dict(V1=V1,V2=V2,V0=V0,Ia1=Ia1,Ia2=Ia2,Ia0=Ia0,Z1ff=Z1ff,Z0ff=Z0ff)
 
+    CACHE_DERIVADOS_MAX = 4     # topologias derivadas guardadas por instância (~160 MB cada)
+
+    def _cache_guardar(self, chave, valor):
+        """Guarda uma topologia derivada, descartando a mais antiga acima do limite."""
+        cache = self.__dict__.setdefault('_cache_derivados', {})
+        while len(cache) >= self.CACHE_DERIVADOS_MAX:
+            cache.pop(next(iter(cache)))
+        cache[chave] = valor
+        return valor
+
+    def _clone_model(self):
+        """Cópia do caso com listas e dicionários próprios, para montar topologia derivada
+        sem alterar o caso original."""
+        import copy as _c
+        Mm = _c.copy(self.M)
+        for k in ('branches', 'shunts', 'shl', 'gens', 'caps', 'mutuas', 'svc', 'zig'):
+            if hasattr(self.M, k):
+                setattr(Mm, k, list(getattr(self.M, k)))
+        for k in ('bus_kv', 'bus_name', 'deol'):
+            if hasattr(self.M, k):
+                setattr(Mm, k, dict(getattr(self.M, k)))
+        if hasattr(self.M, 'eol'):
+            Mm.eol = set(self.M.eol)
+        return Mm
+
+    def _derivado(self, Mm=None, drop_extra=(), manter_extra=(), dropH_extra=(), modo=None):
+        """Solver derivado desta instância, herdando TUDO o que define o cenário: ramos,
+        geradores e reatores retirados, reatores mantidos, bypass de capacitores, charging,
+        modo e a conferência do caso. Uma topologia derivada nunca reintroduz um elemento
+        que o cenário de origem tirou."""
+        S2 = Solver(Mm if Mm is not None else self.M,
+                    drop_branches=list(self.dropB) + list(drop_extra),
+                    drop_gens=list(self.dropG) or None,
+                    block_btb=getattr(self, 'block_btb_arg', True),
+                    charging=self.charging, modo=self._modo(modo),
+                    manter_reatores=list(self.manterShl) + list(manter_extra),
+                    drop_reatores_barra=list(self.dropH) + list(dropH_extra),
+                    bypass_capacitores=list(self.bypassC))
+        S2.factor(avisar=False)
+        if S2.modo == 'completo' and S2._tem_fc():
+            S2.validado_completo = bool(getattr(self, 'validado_completo', False))
+            S2._selo_completo = getattr(self, '_selo_completo', None)
+        return S2
+
+    def _perfil(self, fault_bus, kind='3F', Zf=0.0, modo=None):
+        """Perfis de sequência (V1, V2, V0 e Ia1, Ia2, Ia0) de UM estado de solução.
+
+        No modo completo a sequência positiva é o estado convergido com as fontes de
+        conversor, e as sequências negativa e zero são as respostas das redes passivas às
+        correntes desse mesmo estado. Correntes de ramo e tensões derivadas daqui são
+        consistentes entre si — não há fator de escala aplicado depois.
+        """
+        prof = self._seq_profile(fault_bus, kind, Zf)
+        if prof is None or not (self._modo(modo) == 'completo' and self._tem_fc()):
+            return prof
+        self._exigir_validacao_completo()
+        Z1, Z2, Z0 = self.zth(fault_bus)
+        zf = complex(Zf)
+        if kind == '3F':
+            zeq, r2, r0 = zf, 0, 0
+        elif kind == '2F':
+            zeq, r2, r0 = Z2 + 2 * zf, -1, 0
+        elif kind == '1FT':
+            zeq, r2, r0 = Z2 + Z0 + 3 * zf, 1, 1
+        else:
+            z0f = Z0 + 3 * zf
+            zeq = Z2 * z0f / (Z2 + z0f)
+            r2, r0 = -z0f / (Z2 + z0f), -Z2 / (Z2 + z0f)
+        Vst, Ia1, _ = self._estado_fc_robusto(fault_bus, Zf=zeq)
+        Ia2, Ia0 = r2 * Ia1, r0 * Ia1
+        V2 = prof['V2'] * (Ia2 / prof['Ia2']) if abs(prof['Ia2']) > 1e-12 else prof['V2'] * 0
+        V0 = (prof['V0'] * (Ia0 / prof['Ia0']) if (prof['V0'] is not None
+                                                  and abs(prof['Ia0']) > 1e-12)
+              else (prof['V0'] * 0 if prof['V0'] is not None else None))
+        out = dict(prof)
+        out.update(V1=Vst, V2=V2, V0=V0, Ia1=Ia1, Ia2=Ia2, Ia0=Ia0)
+        return out
+
+    def _i0_linha(self, V0, br, de):
+        """Corrente de sequência zero numa linha, saindo do terminal `de`.
+
+        Linha segmentada por acoplamento mútuo: usa um segmento livre de mútua, onde a
+        corrente é a queda de tensão sobre a impedância do próprio segmento; se todos os
+        segmentos estão acoplados, aplica a matriz primitiva do grupo. Sem isso a corrente
+        seria a queda total sobre a impedância total, o que ignora a tensão induzida.
+        """
+        k = self.lt_key(br['bf'], br['bt'], br['nc'])
+        cortes = getattr(self, 'cortes', {})
+        z0 = zfin(br.get('R0'), br.get('X0'))
+        para = br['bt'] if de == br['bf'] else br['bf']
+        gm = getattr(self, '_gmut', {})
+
+        def pelo_grupo(n1, n2, ks, sinal):
+            grupo, idx, Yp, nos = gm[ks]
+            dv = np.array([V0[self.I0P[nos[g][0]]] - V0[self.I0P[nos[g][1]]] for g in grupo])
+            i_can = (Yp @ dv)[idx[ks]]                 # sentido canônico (menor -> maior)
+            return sinal * (i_can if (n1, n2) == ks[:2] else -i_can)
+
+        # linha acoplada em TODO o comprimento: um único segmento, sem nós auxiliares
+        ks_inteira = ((de, para) if de < para else (para, de)) + (k,)
+        if ks_inteira in gm:
+            return pelo_grupo(de, para, ks_inteira, 1)
+        if k not in cortes or k not in self.direc:
+            if z0 is None or de not in self.I0P or para not in self.I0P:
+                return 0j
+            return (V0[self.I0P[de]] - V0[self.I0P[para]]) / z0
+        a0, b0 = self.direc[k]
+        ps = sorted(cortes[k])
+        sinal = 1 if de == a0 else -1                 # corrente no sentido a0 -> b0
+        segs = []
+        for s in range(len(ps) - 1):
+            n1 = self.aux.get((a0, b0, k[2], ps[s])); n2 = self.aux.get((a0, b0, k[2], ps[s + 1]))
+            zs = self._Zseg.get((n1, n2, k, ps[s], ps[s + 1])) or \
+                 self._Zseg.get((n2, n1, k, ps[s], ps[s + 1]))
+            if n1 is None or n2 is None or zs is None:
+                continue
+            segs.append((n1, n2, zs))
+        for n1, n2, zs in segs:
+            ks = ((n1, n2) if n1 < n2 else (n2, n1)) + (k,)
+            if ks not in gm:
+                return sinal * (V0[self.I0P[n1]] - V0[self.I0P[n2]]) / zs
+        if not segs:
+            return 0j
+        n1, n2, _ = segs[0]
+        ks = ((n1, n2) if n1 < n2 else (n2, n1)) + (k,)
+        return pelo_grupo(n1, n2, ks, sinal)
+
     def _find_branch(self, bf, bt, nc):
         for b in self.M.branches:
             if b['nc']==nc and {b['bf'],b['bt']}=={bf,bt}: return b
         return None
 
     def branch_current(self, fault_bus, bf, bt, nc, kind='3F', Zf=0.0, modo=None):
-        """Corrente de fase (kA primarios) num ramo QUALQUER para uma falta em fault_bus.
-        Funciona para ramo incidente, a N barras de distancia, ou uma linha qualquer.
-        Para LINHAS calcula as tres sequencias; para TRAFOS retorna so seq positiva
-        (o I0 de enrolamento nao e serie simples entre as mesmas barras).
+        """Correntes num ramo para uma falta em `fault_bus`, em kA primários.
 
-        Respeita o MODO da instancia. O perfil de sequencias e resolvido na rede passiva;
-        no modo completo o resultado e escalado pela razao medida na barra em falta, que
-        e o efeito das fontes de conversor."""
-        prof=self._seq_profile(fault_bus, kind, Zf)
-        if prof is None: return None
-        br=self._find_branch(bf,bt,nc)
-        if br is None: return None
-        if (br['bf'],br['bt'],br['nc']) in self.dropB: return None
-        i,j=br['bf'],br['bt']
-        kvb=self.M.bus_kv.get(i,0) or self.M.bus_kv.get(j,0)
-        if not kvb: return None
-        Ib=SB/(np.sqrt(3)*kvb)
-        z1=complex(br['R1'],br['X1'])/100 if br['R1'] is not None else None
-        z0=complex(br['R0'],br['X0'])/100 if (br.get('R0') is not None and br.get('X0') is not None) else None
-        def dI(V,IDX,z):
-            if V is None or z is None or abs(z)<1e-12: return 0j
-            if i not in IDX or j not in IDX: return 0j
-            return (V[IDX[i]]-V[IDX[j]])/z
-        I1=dI(prof['V1'],self.IDXP,z1); I2=dI(prof['V2'],self.IDXP,z1)
-        I0=dI(prof['V0'],self.I0P,z0) if br['tipo']=='L' else 0j
-        a=np.exp(2j*np.pi/3)
-        Ia=I0+I1+I2; Ib2=I0+a*a*I1+a*I2; Ic=I0+a*I1+a*a*I2
-        f=self._fator_fc(fault_bus, kind, modo)
-        return dict(Ia=abs(Ia)*Ib*f,Ib=abs(Ib2)*Ib*f,Ic=abs(Ic)*Ib*f,
-                    Imax=max(abs(Ia),abs(Ib2),abs(Ic))*Ib*f,
-                    I1=abs(I1)*Ib*f,I2=abs(I2)*Ib*f,I0=abs(I0)*Ib*f,kV=kvb,
-                    seqonly=(br['tipo']!='L'), modo=self._modo(modo), fator_fc=f)
+        Sentido positivo: saindo de `bf` em direção a `bt`, como pedido na chamada.
+        Tudo vem de UM estado de solução (`_perfil`): no modo completo, o estado convergido
+        com as fontes de conversor; nenhum fator de escala é aplicado depois.
+
+        Linha: três sequências, com a sequência zero recuperada considerando o acoplamento
+        mútuo. Transformador: positiva e negativa pelo ramo e sequência zero pela conexão
+        dos enrolamentos (`corrente_seq0_ramo`); banco com N unidades em paralelo devolve a
+        corrente AGREGADA e, à parte, a por unidade. Capacitor série também é aceito.
+
+        Devolve módulos (Ia, Ib, Ic, Imax, I1, I2, I0, I3I0), fasores complexos (`fasores`)
+        e o `modo`.
+        """
+        prof = self._perfil(fault_bus, kind, Zf, modo)
+        if prof is None:
+            return None
+        br = self._find_branch(bf, bt, nc)
+        if br is None:
+            for c in getattr(self.M, 'caps', []):
+                if str(c.get('nc', '1')) == str(nc) and {c['bf'], c['bt']} == {bf, bt}:
+                    br = dict(c, tipo='S', R1=0.0, R0=0.0)
+                    break
+        if br is None:
+            return None
+        if (br['bf'], br['bt'], br['nc']) in self.dropB or \
+                (br['bt'], br['bf'], br['nc']) in self.dropB:
+            return None
+        de, para = (bf, bt)
+        kvb = self.M.bus_kv.get(de, 0) or self.M.bus_kv.get(para, 0)
+        if not kvb:
+            return None
+        Ib = SB / (np.sqrt(3) * kvb)
+        z1 = zfin(br.get('R1'), br.get('X1'))
+        nun = (br.get('nunop', 1) or 1) if br['tipo'] == 'T' else 1
+
+        def dI(V, IDX, z):
+            if V is None or z is None or abs(z) < 1e-12:
+                return 0j
+            if de not in IDX or para not in IDX:
+                return 0j
+            return (V[IDX[de]] - V[IDX[para]]) / z
+        I1 = dI(prof['V1'], self.IDXP, z1) * nun
+        I2 = dI(prof['V2'], self.IDXP, z1) * nun
+        if prof['V0'] is None:
+            I0 = 0j
+        elif br['tipo'] == 'L':
+            I0 = self._i0_linha(prof['V0'], br, de)
+        elif br['tipo'] == 'T':
+            I0 = -self.corrente_seq0_ramo(prof['V0'], br, de)
+        else:
+            I0 = dI(prof['V0'], self.I0P, zfin(br.get('R0'), br.get('X0')))
+        a = np.exp(2j * np.pi / 3)
+        Ia = I0 + I1 + I2; Ibf = I0 + a * a * I1 + a * I2; Ic = I0 + a * I1 + a * a * I2
+        m = lambda x: abs(x) * Ib
+        out = dict(Ia=m(Ia), Ib=m(Ibf), Ic=m(Ic), Imax=max(m(Ia), m(Ibf), m(Ic)),
+                   I1=m(I1), I2=m(I2), I0=m(I0), I3I0=3 * m(I0), kV=kvb,
+                   fasores=dict(Ia=Ia * Ib, Ib=Ibf * Ib, Ic=Ic * Ib,
+                                I1=I1 * Ib, I2=I2 * Ib, I0=I0 * Ib),
+                   sentido=f'de {de} para {para}', modo=self._modo(modo),
+                   seqonly=False)
+        if nun > 1:
+            out['unidades'] = nun
+            out['Imax_por_unidade'] = out['Imax'] / nun
+        return out
 
     def bus_voltage(self, fault_bus, obs_bus, kind='3F', Zf=0.0, modo=None):
         """Tensões de fase e fase-fase (pu) numa barra observada durante uma falta.
 
-        Segue o MODO da instância. No modo completo a sequência positiva vem do estado
-        convergido com as fontes de conversor — que sustentam a tensão durante a falta — e
-        as sequências negativa e zero vêm das correntes desse estado aplicadas às redes
-        passivas. Calcular em Thévenin puro subestima a tensão no relé, o que afeta
-        diretamente a verificação de 51V e a impedância aparente de distância.
-
-        Devolve módulos (Va, Vb, Vc, V1, V2, V0), fasores (Va_c, Vb_c, Vc_c, V1_c, V0_c) e
-        Vff_min — a menor tensão fase-fase, em pu da tensão fase-fase nominal.
+        Mesmo estado de solução de `branch_current` (`_perfil`): no modo completo, a
+        sequência positiva vem do estado convergido com as fontes de conversor.
+        Devolve módulos, fasores e Vff_min — a menor tensão fase-fase, em pu da nominal.
         """
-        prof = self._seq_profile(fault_bus, kind, Zf)
+        prof = self._perfil(fault_bus, kind, Zf, modo)
         if prof is None or obs_bus not in self.IDXP:
             return None
         io = self.IDXP[obs_bus]
         V1 = prof['V1'][io]; V2 = prof['V2'][io]
         V0 = prof['V0'][self.I0P[obs_bus]] if (prof['V0'] is not None
                                                  and obs_bus in self.I0P) else 0j
-        if self._modo(modo) == 'completo' and self._tem_fc():
-            self._exigir_validacao_completo()
-            Z1, Z2, Z0 = self.zth(fault_bus)
-            zf = complex(Zf)
-            if kind == '3F':
-                zeq, r2, r0 = zf, 0, 0
-            elif kind == '2F':
-                zeq, r2, r0 = Z2 + 2 * zf, -1, 0
-            elif kind == '1FT':
-                zeq, r2, r0 = Z2 + Z0 + 3 * zf, 1, 1
-            else:
-                z0f = Z0 + 3 * zf
-                zeq = Z2 * z0f / (Z2 + z0f)
-                r2, r0 = -z0f / (Z2 + z0f), -Z2 / (Z2 + z0f)
-            Vst, Ia1, _ = self._estado_fc_robusto(fault_bus, Zf=zeq)
-            V1 = Vst[io]
-            # redes passivas são lineares: escala a resposta de sequência pela corrente
-            V2 = prof['V2'][io] * (r2 * Ia1 / prof['Ia2']) if abs(prof['Ia2']) > 1e-12 else 0j
-            V0 = (V0 * (r0 * Ia1 / prof['Ia0']) if abs(prof['Ia0']) > 1e-12 else 0j)
         a = np.exp(2j * np.pi / 3)
         Va = V0 + V1 + V2; Vb = V0 + a * a * V1 + a * V2; Vc = V0 + a * V1 + a * a * V2
         vff = min(abs(Va - Vb), abs(Vb - Vc), abs(Vc - Va)) / np.sqrt(3)
@@ -1947,88 +2125,67 @@ class Solver:
                     Va_c=Va, Vb_c=Vb, Vc_c=Vc, V1_c=V1, V0_c=V0, Vff_min=vff,
                     modo=self._modo(modo))
 
-    def line_end_open(self, bf, bt, nc, closed, kind='3F', p=1.0, Zf=0.0,
-                      modo=None):
-        """Falta na linha (bf,bt,nc) com o terminal remoto ABERTO.
+    def _solver_terminal_aberto(self, br, closed):
+        """Solver derivado com a extremidade de `br` oposta a `closed` aberta.
 
-        Condição de abertura sequencial de disjuntor: o terminal oposto já abriu e a
-        falta permanece. Devolve a corrente que atravessa o TC do terminal `closed`, em
-        kA primários.
+        A linha continua ligada ao terminal fechado e passa a terminar num nó fictício na
+        ponta aberta, levando consigo o reator de linha daquela ponta — é como o ANAFAS
+        representa o terminal aberto. Guardado em cache nesta instância.
+        """
+        chave = ('aberto', br['bf'], br['bt'], br['nc'], closed)
+        cache = self.__dict__.setdefault('_cache_derivados', {})
+        if chave in cache:
+            return cache[chave]
+        Mm = self._clone_model()
+        X = max(Mm.bus_kv) + 1
+        aberta = br['bt'] if closed == br['bf'] else br['bf']
+        Mm.bus_kv[X] = self.M.bus_kv.get(aberta, 0) or self.M.bus_kv.get(closed, 0)
+        Mm.bus_name[X] = 'FIC.ABERTO'
+        nova = dict(br)
+        if aberta == br['bt']:
+            nova['bt'] = X
+        else:
+            nova['bf'] = X
+        Mm.branches = [x for x in Mm.branches if x is not br] + [nova]
+        shl = []
+        for r in Mm.shl:
+            if {r['bf'], r['bt']} == {br['bf'], br['bt']} and str(r.get('nc', '1')) == str(br['nc']):
+                r = dict(r)
+                r['bf'] = X if r['bf'] == aberta else r['bf']
+                r['bt'] = X if r['bt'] == aberta else r['bt']
+            shl.append(r)
+        Mm.shl = shl
+        manter = [(nova['bf'], nova['bt'], nova['nc'])]
+        S2 = self._derivado(Mm, manter_extra=manter)
+        return self._cache_guardar(chave, (S2, X, nova))
 
-        `p` é a posição da falta, medida a partir de `closed`, de 0 a 1:
+    def line_end_open(self, bf, bt, nc, closed, kind='3F', p=1.0, Zf=0.0, modo=None):
+        """Falta na linha (bf,bt,nc) com o terminal remoto ABERTO. kA primários.
 
-            p → 0    close-in, na cara do disjuntor
-            p = 0.5  meio da linha
-            p = 1    ponta oposta, junto ao terminal aberto (padrão)
-
-        LIMITAÇÃO CONHECIDA. Sem representação de charging, o trecho entre a falta e o
-        terminal aberto não conduz, e a corrente do TC é a da falta. O ANAFAS mantém o
-        trecho pendurado e representa sua capacitância: no caso de referência (falta em
-        6640 com 5570 aberto) a monofásica fecha em −0,41%, mas a trifásica erra −4,11%,
-        porque a capacitância do stub reduz a impedância vista. O erro é conservador para
-        sensibilidade e não conservador para dimensionamento. Ver docs/uso.md.
+        Topologia real: a ponta oposta a `closed` é aberta e a linha fica pendurada no
+        terminal fechado, com os seus reatores. `p` é a posição da falta a partir de
+        `closed`: p → 0 junto ao disjuntor, p = 1 na ponta aberta. Devolve a corrente que
+        atravessa o TC do terminal fechado. Segue o modo da instância; o acoplamento mútuo
+        da linha aberta não é mantido na topologia derivada.
         """
         br = self._find_branch(bf, bt, nc)
         if br is None or br['tipo'] != 'L':
             return None
+        if modo is not None and modo != self.modo:
+            S = Solver(self.M, drop_branches=list(self.dropB), modo=modo,
+                       charging=self.charging, manter_reatores=list(self.manterShl),
+                       drop_reatores_barra=list(self.dropH),
+                       bypass_capacitores=list(self.bypassC))
+            S.validado_completo = getattr(self, 'validado_completo', False)
+            S._selo_completo = getattr(self, '_selo_completo', None)
+            return S.line_end_open(bf, bt, nc, closed, kind, p, Zf)
         p = min(max(float(p), 0.0), 1.0)
-        drop = list(self.dropB) + [(br['bf'], br['bt'], br['nc'])]
-        modo = self._modo(modo)
-        S2 = Solver(self.M, drop_branches=drop, charging=self.charging, modo=modo,
-                    manter_reatores=[(br['bf'], br['bt'], br['nc'])])
-        S2.factor(avisar=False)
-        if modo == 'completo' and S2._tem_fc():
-            # A liberação vem de quem chamou: este é um cenário derivado do mesmo caso.
-            S2.validado_completo = bool(getattr(self, 'validado_completo', False))
-            S2._selo_completo = getattr(self, '_selo_completo', None)
-            S2._exigir_validacao_completo()
-        Z1, _, Z0 = S2.zth(closed)
-        if Z1 is None:
-            return None
-        fator_fc = 1.0
-        if modo == 'completo' and S2._tem_fc():
-            # As fontes de conversor elevam a corrente. Em p→0 o estado é resolvido
-            # direto por fault_fc, que é exato; para p>0 aplica-se a mesma razão ao
-            # Thévenin do ponto, porque a injeção varia pouco ao longo da linha perto do
-            # terminal e a alternativa — resolver o estado num nó intermediário — exige
-            # inserir a barra na rede. Em p=0 o resultado é exato (18.216 A contra 18.211
-            # medidos no caso de referência); ao longo da linha é aproximação declarada.
-            try:
-                base = S2.fault(closed, kind, modo='sincronas')
-                comf = S2.fault_fc(closed, kind)
-                if base and comf:
-                    fator_fc = comf / base
-            except Exception:
-                fator_fc = 1.0
-        z1L = complex(br['R1'], br['X1']) / 100
-        z0L = (complex(br['R0'], br['X0']) / 100
-               if (br.get('R0') is not None and br.get('X0') is not None) else None)
-        kvb = self.M.bus_kv.get(closed, 0)
-        if not kvb:
-            return None
-        Ib = SB / (np.sqrt(3) * kvb); zf = complex(Zf)
-        Z1t = Z1 + p * z1L; Z2t = Z1t
-        if kind == '3F':
-            I = 1 / (Z1t + zf)
-        elif kind == '1FT':
-            if Z0 is None or z0L is None:
-                return None
-            I = 3 / (Z1t + Z2t + (Z0 + p * z0L) + 3 * zf)
-        elif kind == '2F':
-            I = np.sqrt(3) / (Z1t + Z2t + 2 * zf)
-        elif kind == '2FT':
-            if Z0 is None or z0L is None:
-                return None
-            z0t = Z0 + p * z0L + zf
-            z1f, z2f = Z1t + zf, Z2t + zf
-            a = np.exp(2j * np.pi / 3)
-            den = z1f * z2f + z1f * z0t + z2f * z0t
-            ib = (z0t - a * z2f) / den
-            ic = (z0t - a.conjugate() * z2f) / den
-            return np.sqrt(3) * max(abs(ib), abs(ic)) * Ib * fator_fc
-        else:
-            return None
-        return abs(I) * Ib * fator_fc
+        S2, X, nova = self._solver_terminal_aberto(br, closed)
+        if p >= 1.0 - 1e-6:
+            r = S2.branch_current(X, closed, X, nova['nc'], kind, Zf)
+            return r['Imax'] if r else None
+        r = S2.fault_on_branch(closed, X, nova['nc'], p, kind, Zf)
+        return r.get('I_term_%d' % closed) if r else None
 
     def varredura_line_end_open(self, bf, bt, nc, closed, kinds=('3F', '1FT', '2F', '2FT'),
                                 pontos=(0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0)):
@@ -2074,21 +2231,18 @@ class Solver:
         Mm.branches += [seg(p,sbf,F), seg(1-p,F,sbt)]
         has_mut=any({m['bf1'],m['bt1']}=={sbf,sbt} or {m['bf2'],m['bt2']}=={sbf,sbt}
                     for m in self.M.mutuas)
-        S2=Solver(Mm, block_btb=False, charging=self.charging, modo=self._modo(modo))
-        S2.factor(avisar=False)
-        if S2.modo=='completo' and S2._tem_fc():
-            # cenario derivado do mesmo caso: a liberacao acompanha a instancia de origem
-            S2.validado_completo=bool(getattr(self,'validado_completo',False))
-            S2._selo_completo=getattr(self,'_selo_completo',None)
+        chave=('ramo',sbf,sbt,br['nc'],round(p,9))
+        cache=self.__dict__.setdefault('_cache_derivados',{})
+        S2=cache[chave] if chave in cache else self._cache_guardar(chave, self._derivado(Mm))
         out={'kV':kvL,'p':p,'mutua_aprox':has_mut}
-        out['If']=S2.fault(F,kind)
-        ci=S2.branch_current(F, sbf,F,br['nc'],kind)
-        cj=S2.branch_current(F, F,sbt,br['nc'],kind)
+        out['If']=S2.fault(F,kind,Zf=Zf)
+        # corrente que cada terminal fornece à falta: sentido do terminal para o ponto F
+        ci=S2.branch_current(F, sbf,F,br['nc'],kind,Zf)
+        cj=S2.branch_current(F, sbt,F,br['nc'],kind,Zf)
         out['I_term_%d'%sbf]=ci['Imax'] if ci else None
         out['I_term_%d'%sbt]=cj['Imax'] if cj else None
-        if kind=='1FT' and br['tipo']=='L':
-            out['3I0_term_%d'%sbf]=3*ci['I0'] if ci else None
-            out['3I0_term_%d'%sbt]=3*cj['I0'] if cj else None
+        out['3I0_term_%d'%sbf]=ci['I3I0'] if ci else None
+        out['3I0_term_%d'%sbt]=cj['I3I0'] if cj else None
         return out
 
     def fault_on_shunt(self, bus, p, kind='1FT', Zf=0.0, modo=None):
@@ -2117,14 +2271,10 @@ class Solver:
         for k in ('X1','X0'):
             if resid.get(k) is not None and np.isfinite(resid[k]): resid[k]=resid[k]*(1-p)
         Mm.shunts=list(Mm.shunts)+[resid]
-        S2=Solver(Mm, block_btb=False, charging=self.charging, modo=self._modo(modo))
-        S2.factor(avisar=False)
-        if S2.modo=='completo' and S2._tem_fc():
-            # cenario derivado do mesmo caso: a liberacao acompanha a instancia de origem
-            S2.validado_completo=bool(getattr(self,'validado_completo',False))
-            S2._selo_completo=getattr(self,'_selo_completo',None)
-        return {'kV':kvb,'p':p,'If':S2.fault(F,kind),
-                'I_terminal':(lambda c: c['Imax'] if c else None)(S2.branch_current(F,bus,F,'RT',kind))}
+        S2=self._derivado(Mm, modo=modo)
+        return {'kV':kvb,'p':p,'If':S2.fault(F,kind,Zf=Zf),
+                'I_terminal':(lambda c: c['Imax'] if c else None)(
+                    S2.branch_current(F,bus,F,'RT',kind,Zf))}
 
     def winding_ground_fault(self, term_bus, Zw_pct, npts=11, side_seq='0'):
         """Curva simplificada de falta a terra no enrolamento (estrela aterrada) para
@@ -2189,23 +2339,6 @@ class Solver:
         if m not in ('sincronas', 'completo'):
             raise ValueError(f"modo deve ser 'sincronas' ou 'completo', recebido {m!r}")
         return m
-
-    def _fator_fc(self, bus, kind='3F', modo=None):
-        """Razão entre o modo completo e o Thévenin puro na barra, ou 1,0.
-
-        Usado pelas grandezas derivadas do perfil de sequências — corrente de ramo,
-        tensão de barra, falta intermediária — que são calculadas na rede passiva e
-        precisam do efeito das fontes de conversor aplicado.
-        """
-        if self._modo(modo) != 'completo' or not self._tem_fc():
-            return 1.0
-        try:
-            self._exigir_validacao_completo()
-            base = self.fault(bus, kind, modo='sincronas')
-            comf = self.fault_fc(bus, kind)
-            return (comf / base) if (base and comf) else 1.0
-        except Exception:
-            return 1.0
 
     def _tem_fc(self):
         """O caso tem geradores de conversor pleno?
@@ -2503,50 +2636,78 @@ def envelope_contribuicoes(model, barra, tipos=('3F', '1FT', '2F', '2FT'),
     # falta na linha com o terminal oposto aberto
     for e in incid:
         if e[0] == 'L':
+            # a topologia real (linha pendurada) é montada a partir da rede de origem
             cen.append((f'terminal oposto aberto em {e[1]}-{e[2]}/{e[3]}',
-                        [(e[1], e[2], e[3])], barra, ('LEO',) + e[1:]))
+                        [], barra, ('LEO',) + e[1:]))
 
     saida = {e: {'casos': []} for e in incid}
     cache = {}
     for rot, drop, fb, extra in cen:
-        chave = tuple(sorted(drop))
+        # retirada integral do equipamento (transformador leva todas as pernas)
+        drop_eq = []
+        for r in drop:
+            drop_eq += _equipamento(model, r, barra)
+        chave = tuple(sorted(set(drop_eq)))
         if chave not in cache:
             try:
-                S = S0 if not drop else Solver(model, drop_branches=list(drop),
-                                               modo=getattr(S0, 'modo', 'completo'))
-                if drop:
-                    S.factor(avisar=False)
-                cache[chave] = S
-            except Exception:
+                cache[chave] = S0 if not drop_eq else _solver(
+                    model, list(chave), getattr(S0, 'modo', 'completo'))
+            except Exception as ex:
                 cache[chave] = None
+                for e in incid:
+                    saida[e].setdefault('falhas', []).append(f'{rot}: {type(ex).__name__}')
         S = cache[chave]
-        if S is None or fb not in S.IDXP:
+        if S is None:
             continue
         for tipo in tipos:
-            try:
-                prof = S._seq_profile(fb, tipo)
-            except Exception:
-                prof = None
-            if prof is None:
-                continue
-            V0 = prof['V0']
-            for e in incid:
-                if (e[1], e[2], e[3]) in S.dropB:
+            if extra and extra[0] == 'LEO':
+                # terminal oposto aberto: topologia real, só o vão da própria linha
+                e = next((x for x in incid if (x[1], x[2], x[3]) == tuple(extra[1:])), None)
+                br = S._find_branch(*extra[1:]) if e else None
+                if br is None:
                     continue
                 try:
-                    r = S.branch_current(fb, e[1], e[2], e[3], tipo)
-                except Exception:
-                    r = None
-                if not r:
+                    S2, X, nova = S._solver_terminal_aberto(br, barra)
+                    pontas = [('junto ao disjuntor',
+                               S2.fault_on_branch(barra, X, nova['nc'], 1e-3, tipo)),
+                              ('na ponta aberta',
+                               S2.branch_current(X, barra, X, nova['nc'], tipo))]
+                except Exception as ex:
+                    saida[e].setdefault('falhas', []).append(f'{rot}, {tipo}: {type(ex).__name__}')
                     continue
-                ifase = r['Imax']
-                kvb = model.bus_kv.get(barra, 0)
-                Ib = SB / (np.sqrt(3) * kvb) if kvb else 0
-                br = S._find_branch(e[1], e[2], e[3])
-                i3i0 = 0.0
-                if V0 is not None and br is not None and Ib:
-                    i3i0 = abs(3 * S.corrente_seq0_ramo(V0, br, barra)) * Ib
-                saida[e]['casos'].append((f'{rot} · {tipo}', tipo, ifase, i3i0))
+                for onde, r in pontas:
+                    if not r:
+                        continue
+                    if 'Imax' in r:
+                        ifs, i3 = r['Imax'], r['I3I0']
+                    else:
+                        ifs, i3 = r.get('I_term_%d' % barra), r.get('3I0_term_%d' % barra)
+                    if ifs:
+                        saida[e]['casos'].append((f'{rot}, falta {onde} · {tipo}', tipo,
+                                                  ifs, i3 or 0.0))
+                continue
+            if extra:
+                # close-in dentro do equipamento: falta logo após o TC do vão
+                e = extra
+                try:
+                    r = S.fault_on_branch(barra, e[2] if e[1] == barra else e[1], e[3], 1e-3, tipo)
+                except Exception as ex:
+                    saida[e].setdefault('falhas', []).append(f'{rot}, {tipo}: {type(ex).__name__}')
+                    continue
+                if r and r.get('I_term_%d' % barra):
+                    saida[e]['casos'].append((f'{rot} · {tipo}', tipo, r['I_term_%d' % barra],
+                                              r.get('3I0_term_%d' % barra) or 0.0))
+                continue
+            for e in incid:
+                if set(_equipamento(model, (e[1], e[2], e[3]), barra)) & set(chave):
+                    continue                                  # vão fora de serviço
+                try:
+                    r = S.branch_current(fb, e[1], e[2], e[3], tipo)
+                except Exception as ex:
+                    saida[e].setdefault('falhas', []).append(f'{rot}, {tipo}: {type(ex).__name__}')
+                    continue
+                if r:
+                    saida[e]['casos'].append((f'{rot} · {tipo}', tipo, r['Imax'], r['I3I0']))
 
     for e, d in saida.items():
         for campo, idx in (('fase', 2), ('terra', 3)):
@@ -2596,7 +2757,10 @@ def _premissas_curto(S):
     """Premissas presentes em todo cálculo de curto-circuito desta instância."""
     sel = S.selo_completo() if hasattr(S, 'selo_completo') else {}
     p = ['tensão pré-falta de 1,0 pu em todas as barras, sem carregamento prévio',
-         'correntes em kA primários (A primários nos ajustes)']
+         'correntes em kA primários (A primários nos ajustes)',
+         'sequência negativa igual à positiva: o .ANA não traz reatância de sequência '
+         'negativa das máquinas; grandezas de sequência negativa (46, 67Q) têm essa '
+         'limitação e não são conferidas contra o ANAFAS']
     if S.modo == 'completo' and S._tem_fc():
         p.append('modo completo: inclui a contribuição dos geradores conectados por '
                  'conversor, conforme a curva do Submódulo 2.10')
@@ -2718,6 +2882,18 @@ def _ramos_incidentes(model, bus):
             elif len(t) >= 3:
                 out.append((t[0], t[1], str(t[2])))
     return out
+
+
+def _equipamento(model, ramo, barra=None):
+    """Ramos que compõem o EQUIPAMENTO do ramo dado: transformador de três enrolamentos é
+    representado com nó fictício (tensão nula), e retirá-lo exige todas as pernas.
+    Transformador de dois enrolamentos, linha e capacitor série são o próprio ramo."""
+    a, b, c = ramo[0], ramo[1], str(ramo[2])
+    for no in (a, b):
+        if no != barra and not model.bus_kv.get(no):
+            return [(x['bf'], x['bt'], str(x['nc'])) for x in model.branches
+                    if no in (x['bf'], x['bt'])]
+    return [(a, b, c)]
 
 
 def _k0(br):
@@ -2870,7 +3046,8 @@ CRITERIOS_SOBRECORRENTE = {
         f67nt_max_1f=0.70,     # 67NT: no máximo 70% da monofásica remota
     ),
     'transformador': dict(
-        f51_nominal=1.50,      # pickup do 51: 150% da nominal
+        f51_nominal=None,      # pickup do 51: sem padrão universal — informar o critério
+                               # (ex.: {'f51_nominal': 1.5}); sem ele, dados_faltantes
         f50_margem=1.20,       # 50 acima do passa-através e do inrush com essa margem
     ),
     # 51V — comum a linha e transformador
@@ -2929,6 +3106,56 @@ def _avaliar_51v(S, bus_rele, pickup51, faltas, crit51v, prem):
 
 
 
+CAMPOS_EVIDENCIA = ('fonte', 'secao', 'revisao', 'base', 'unidade', 'resolucao',
+                    'classe_evidencia')
+
+
+def politica_exportacao(resultado, perfil_ied=None):
+    """Decide se um resultado de ajuste pode ser exportado como ajuste de IED.
+
+    Exportar exige: perfil do IED com cada regra documentada (fonte, seção, revisão, base,
+    unidade, resolução, classe de evidência) e toda função em calculavel_verificada. Um
+    exemplo de manual não vira requisito. Sem isso, o resultado serve como INSUMO de
+    estudo, não como ajuste a transferir para o relé.
+    """
+    motivos = []
+    if not perfil_ied:
+        motivos.append('perfil de IED não informado')
+    else:
+        for par, regra in (perfil_ied.get('regras') or {}).items():
+            falta = [c for c in CAMPOS_EVIDENCIA if not regra.get(c)]
+            if falta:
+                motivos.append(f'regra {par} sem ' + ', '.join(falta))
+            if regra.get('classe_evidencia') == 'exemplo':
+                motivos.append(f'regra {par} tem classe "exemplo": não vira requisito')
+    for nome, f in (resultado.get('funcoes') or {}).items():
+        itens = f.values() if isinstance(f, dict) and 'estado' not in f else [f]
+        for x in itens:
+            if isinstance(x, dict) and x.get('estado') not in (None, 'calculavel_verificada'):
+                motivos.append(f'{nome}: {x.get("estado")}')
+    return dict(exportavel=not motivos, motivos=motivos)
+
+
+ESTADOS = ('calculavel_verificada', 'faixa_inviavel', 'dados_faltantes',
+           'modelo_nao_suportado', 'validacao_pendente', 'erro_execucao')
+
+
+def _estado(f, conferido=True):
+    """Estado explícito de um resultado de ajuste. Resultado incompleto nunca aparece
+    como faixa aprovada."""
+    if f.get('erro'):
+        return 'erro_execucao'
+    if f.get('viavel') is False or f.get('necessaria') and f.get('alertas') and any(
+            'não se sensibiliza' in a for a in f['alertas']):
+        return 'faixa_inviavel'
+    if f.get('pickup') is None and f.get('min') is None and f.get('max') is None:
+        return 'dados_faltantes'
+    if f.get('viavel') is None and ('min' in f or 'max' in f) and (
+            f.get('min') is None or f.get('max') is None):
+        return 'dados_faltantes'
+    return 'calculavel_verificada' if conferido else 'validacao_pendente'
+
+
 def _faixa(minimo, maximo):
     """Faixa admissível. Viável se o limite inferior não exceder o superior."""
     if minimo is None or maximo is None:
@@ -2937,7 +3164,8 @@ def _faixa(minimo, maximo):
 
 
 def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
-                         modo='completo', curva='MI', norma='IEC', cenarios=None):
+                         modo='completo', curva='MI', norma='IEC', cenarios=None,
+                         perfil_ied=None):
     """Faixas admissíveis e viabilidade das funções de sobrecorrente de um equipamento.
 
     NÃO escolhe o ajuste. Para cada função devolve a faixa que os critérios admitem, se ela
@@ -3005,6 +3233,8 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
             r = S.branch_current(fbus, bf, bt, nc, kind)
             return kA(r['Imax']) if r else None
         i_barra_remota = {k: i_ramo(bt, k) for k in ('3F', '1FT', '2F')}
+        r1f = S.branch_current(bt, bf, bt, nc, '1FT')
+        i3i0_remota = kA(r1f['I3I0']) if r1f else None      # 3I0 no TC, não a corrente de fase
         i_barra_local = {k: kA(S.fault(bf, k)) for k in ('3F', '1FT')}
         i_leo = {k: kA(S.line_end_open(bf, bt, nc, bf, k, p=1.0)) for k in ('3F', '2F', '1FT')}
 
@@ -3022,7 +3252,7 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
                     f"{crit['sotf_frac_min']:.0%} do curto mínimo remoto; STUB até "
                     f"{crit['stub_frac']:.0%} do curto da barra; 67NT entre "
                     f"{crit['f67nt_min_in_tc']:.0%} de In do TC e "
-                    f"{crit['f67nt_max_1f']:.0%} da monofásica remota")
+                    f"{crit['f67nt_max_1f']:.0%} da 3I0 no TC para monofásica remota")
         if pk:
             try:
                 f51['tms_minimo'] = _curvas.tms_para_tempo(severo, pk, crit['t_z2'], curva, norma)
@@ -3040,7 +3270,14 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
 
         # --- 50: só se seletivo para falta na barra remota ---
         i_remota_max = max(v for v in i_barra_remota.values() if v)
-        i_local = i_barra_local['3F']
+        # teto do 50: falta close-in na própria linha, com a corrente que o TC realmente vê
+        # (a contribuição do terminal remoto não passa por ele)
+        try:
+            ci = S.fault_on_branch(bf, bt, nc, 1e-3, '3F')
+            i_local = kA(ci.get('I_term_%d' % bf)) if ci else None
+        except Exception:
+            i_local = None
+        i_local = i_local or i_barra_local['3F']
         piso = crit['f50_margem'] * i_remota_max
         f50 = _faixa(piso, i_local)
         f50.update(criterio=f"acima de {crit['f50_margem']:.0%} da falta na barra remota",
@@ -3077,12 +3314,12 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
                                       i_barra=i_local)
 
         # --- 67NT: entre 10% de In do TC e 70% da monofásica remota ---
-        teto = crit['f67nt_max_1f'] * i_barra_remota['1FT'] if i_barra_remota['1FT'] else None
+        teto = crit['f67nt_max_1f'] * i3i0_remota if i3i0_remota else None
         piso = None if falta('in_tc') else crit['f67nt_min_in_tc'] * float(dados['in_tc'])
         f67 = _faixa(piso, teto)
         f67.update(criterio=f"entre {crit['f67nt_min_in_tc']:.0%} de In do TC e "
                             f"{crit['f67nt_max_1f']:.0%} da monofásica remota",
-                   usual=piso, i_1f_remota=i_barra_remota['1FT'], curva='muito inversa')
+                   usual=piso, i_3i0_remota=i3i0_remota, curva='muito inversa')
         out['funcoes']['67NT'] = f67
 
     elif tipo == 'transformador':
@@ -3097,12 +3334,17 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
                 inom = cm['cap_normal_A']
                 prem.append('corrente nominal do transformador: capacidade normal declarada '
                             'no ANAREDE')
+        f51n = crit.get('f51_nominal')
+        if not f51n and 'criterio_51_transformador' not in out['faltantes']:
+            out['faltantes'].append('criterio_51_transformador')
         out['funcoes']['51'] = dict(
-            pickup=crit['f51_nominal'] * float(inom) if inom else None,
-            criterio=f"{crit['f51_nominal']:.0%} da nominal")
-        prem.append(f"51 de transformador: pickup em {crit['f51_nominal']:.0%} da corrente "
-                    f"NOMINAL, não referido à capacidade de emergência — se esta superar "
-                    f"o pickup, a proteção pode atuar em regime de emergência")
+            pickup=f51n * float(inom) if (inom and f51n) else None,
+            criterio=(f"{f51n:.0%} da nominal" if f51n else
+                      'critério não definido: o múltiplo da nominal depende da filosofia e '
+                      'do perfil de carga do transformador'))
+        if f51n:
+            prem.append(f"51 de transformador: pickup em {f51n:.0%} da corrente NOMINAL, "
+                        f"critério informado; não referido à capacidade de emergência")
         prem.append(f"50 de transformador: acima de {crit['f50_margem']:.0%} do maior entre "
                     f"o passa-através para falta na barra do outro lado e o inrush, e "
                     f"abaixo da falta na barra local; banco de três enrolamentos com a "
@@ -3139,7 +3381,14 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
         except Exception:
             passa = None
         passa = kA(passa)
-        i_local = kA(S.fault(bf, '3F'))
+        # teto do 50 do transformador: falta nos terminais do próprio transformador, com a
+        # corrente vista pelo TC do lado do relé
+        try:
+            ci = S.fault_on_branch(bf, bt, nc, 1e-3, '3F')
+            i_local = kA(ci.get('I_term_%d' % bf)) if ci else None
+        except Exception:
+            i_local = None
+        i_local = i_local or kA(S.fault(bf, '3F'))
         base = [x for x in (passa, None if falta('inrush') else float(dados['inrush'])) if x]
         piso = crit['f50_margem'] * max(base) if base else None
         f50 = _faixa(piso, i_local)
@@ -3151,6 +3400,12 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
         out['funcoes']['50'] = f50
     else:
         raise ValueError("tipo deve ser 'linha' ou 'transformador'")
+    conferido = bool(S.selo_completo().get('conferido_no_caso')) or not (
+        S.modo == 'completo' and S._tem_fc())
+    for f in out['funcoes'].values():
+        if isinstance(f, dict):
+            f['estado'] = _estado(f, conferido)
+    out['exportacao'] = politica_exportacao(out, perfil_ied)
     return out
 
 
@@ -3160,8 +3415,8 @@ def ajuste_sobrecorrente(model, tipo, elemento, dados=None, criterios=None,
 
 CRITERIOS_BARRA = dict(
     f_icc=0.67,          # ajuste sugerido: 67% do curto mínimo (relação de sensibilidade 1,5)
-    f_checkzone=0.80,    # checkzone: 80% do pickup do 87B
-    f_alarme=0.15,       # alarme diferencial: 15% do pickup do 87B
+    f_checkzone=None,    # checkzone: sem escala fixa — faixa própria; informar se desejado
+    f_alarme=None,       # alarme: sem escala fixa — faixa pela menor carga REAL dos vãos
     piso_in_tc=0.05,     # todo pickup acima de 5% de In do TC de referência
     f_icc_max=0.80,      # teto: pickup abaixo de 80% da menor falta (guia REB670)
     faixa_tc=(0.5, 1.5), # faixa típica do pickup: 50% a 150% de In do maior TC (guia REB670)
@@ -3180,33 +3435,8 @@ SLOPE_87B_POR_FABRICANTE = {
 }
 
 
-def _i_aberto(Z1, Z0, z1L, z0L, p, kind, Ib, f=1.0):
-    """Corrente pelo terminal fechado para falta a fração `p` de uma linha com o outro
-    terminal aberto, pelo Thévenin da barra sem a linha. Mesmas convenções de `fault`."""
-    if Z1 is None:
-        return None
-    Z1t = Z1 + p * z1L
-    if kind == '3F':
-        I = 1 / Z1t
-    elif kind == '2F':
-        I = np.sqrt(3) / (2 * Z1t)
-    else:
-        if Z0 is None or z0L is None:
-            return None
-        Z0t = Z0 + p * z0L
-        if kind == '1FT':
-            I = 3 / (2 * Z1t + Z0t)
-        else:
-            a = np.exp(2j * np.pi / 3)
-            den = Z1t * Z1t + 2 * Z1t * Z0t
-            ib = (Z0t - a * Z1t) / den
-            ic = (Z0t - a.conjugate() * Z1t) / den
-            return np.sqrt(3) * max(abs(ib), abs(ic)) * Ib * f * 1000.0
-    return abs(I) * Ib * f * 1000.0
-
-
 def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
-                 modo='completo', kinds=_KINDS):
+                 modo='completo', kinds=_KINDS, perfil_ied=None):
     """Estudo de proteção de uma barra: 87B, checkzone, alarme diferencial, 50BF e EFP.
 
     Resolve o estudo inteiro a partir do pedido "proteção da barra X". Tudo em A primários.
@@ -3256,12 +3486,7 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
         return not model.bus_kv.get(outro(r))
 
     def equipamento(r):
-        """Ramos a retirar para tirar o equipamento: trafo leva todas as pernas."""
-        if not e_trafo(r):
-            return [r]
-        no = outro(r)
-        return [(x['bf'], x['bt'], str(x['nc'])) for x in model.branches
-                if no in (x['bf'], x['bt'])]
+        return _equipamento(model, r, barra)
 
     def nome(r):
         return f"{'T' if e_trafo(r) else 'L'} {r[0]}-{r[1]}/{r[2]}"
@@ -3333,14 +3558,40 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
         if c['origem'] is None:
             b = da_base(model, *r)
             if b.get('in_nominal'):
-                c.update(nominal_A=b['in_nominal'], emergencia_A=b['in_nominal'],
-                         origem='.ANA, potência nominal (emergência não disponível)')
+                c.update(nominal_A=b['in_nominal'], emergencia_A=None,
+                         origem='.ANA, potência nominal; capacidade de emergência não '
+                                'declarada')
         cargas[nome(r)] = c
     emerg = [c['emergencia_A'] for c in cargas.values() if c['emergencia_A']]
     nomin = [c['nominal_A'] for c in cargas.values() if c['nominal_A']]
-    carga_max = max(emerg) if emerg else None
+    hip_carga = None
+    if emerg:
+        carga_max = max(emerg)
+    elif nomin:
+        # HIPÓTESE EXPLÍCITA: sem capacidade de emergência declarada, o piso de carga usa a
+        # nominal — que é menor que a emergência e portanto não protege contra atuação em
+        # regime de emergência. Registrada nas premissas e nos alertas do 87B.
+        carga_max = max(nomin)
+        hip_carga = ('capacidade de emergência não declarada: piso de carga do 87B pela '
+                     'NOMINAL, abaixo da emergência real')
+    else:
+        carga_max = None
     carga_min_nom = min(nomin) if nomin else None
 
+    carga_min_real = None
+    if cenarios:
+        pass
+        reais = []
+        for pwf in cenarios.values():
+            fl = fluxos(pwf)
+            for r in inc:
+                f = fl.get((r[0], r[1], r[2])) or fl.get((r[1], r[0], r[2]))
+                if f and f.get('calculavel'):
+                    i = f['I_de_A'] if (f is fl.get((r[0], r[1], r[2])) and r[0] == barra) \
+                        else f['I_para_A']
+                    if i:
+                        reais.append(i)
+        carga_min_real = min(reais) if reais else None
     in_ref = dados.get('in_tc_ref')
     piso_tc = (max(crit['piso_in_tc'], dados.get('ajuste_minimo_rele', 0) or 0) * float(in_ref)
                if in_ref else None)
@@ -3353,6 +3604,9 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
         return v
 
     funcoes, alertas87 = {}, []
+    if hip_carga:
+        alertas87.append(hip_carga)
+        prem.append(hip_carga)
     sug = crit['f_icc'] * icc_min
     if carga_max is None:
         pk = sug; alertas87.append('carga dos vãos não disponível: piso de carga não verificado')
@@ -3382,51 +3636,87 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
     funcoes['87B'] = dict(pickup=pk, faixa=(carga_max, icc_min), icc_min=icc_min,
                           condicao_icc_min=cond_min, relacao=icc_min / pk,
                           carga_emergencia_max=carga_max, alertas=alertas87)
+    # checkzone: critério próprio — operar para toda falta interna da barra, com a mesma
+    # corrente mínima; sem escala fixa em relação ao 87B
     ac = []
-    ck = aplica_piso(crit['f_checkzone'] * pk, ac)
-    funcoes['checkzone'] = dict(pickup=ck, relacao=icc_min / ck, alertas=ac)
+    teto_ck = crit['f_icc_max'] * icc_min
+    if crit.get('f_checkzone'):
+        ck = aplica_piso(crit['f_checkzone'] * pk, ac)
+    else:
+        ck = None
+        ac.append('ajuste não sugerido: informe o critério da checkzone; a faixa garante '
+                  'operação para toda falta interna')
+    funcoes['checkzone'] = dict(pickup=ck, min=piso_tc, max=teto_ck,
+                                viavel=(piso_tc or 0) <= teto_ck,
+                                relacao=(icc_min / ck) if ck else None, alertas=ac)
+    # alarme de TC aberto: abaixo da MENOR CORRENTE REAL conduzida pelos vãos — é ela que
+    # aparece como diferencial quando um TC abre; a nominal não serve de referência.
+    # Limite inferior (diferencial permanente) e temporização dependem dos TCs.
     aa = []
-    al = aplica_piso(crit['f_alarme'] * pk, aa)
-    if carga_min_nom and al >= carga_min_nom:
-        aa.append(f'alarme acima da menor carga nominal dos vãos ({carga_min_nom:.0f} A): '
+    if carga_min_real is None:
+        aa.append('menor corrente real dos vãos indisponível: requer os casos do ANAREDE')
+    if crit.get('f_alarme'):
+        al = aplica_piso(crit['f_alarme'] * pk, aa)
+    else:
+        al = None
+        aa.append('ajuste não sugerido: informe o critério; o limite superior é a menor '
+                  'corrente real dos vãos')
+    if al and carga_min_real and al >= carga_min_real:
+        aa.append(f'alarme acima da menor corrente real dos vãos ({carga_min_real:.0f} A): '
                   f'TC aberto nesse vão não será detectado')
-    funcoes['alarme'] = dict(pickup=al, limite_superior=carga_min_nom, alertas=aa)
+    funcoes['alarme'] = dict(pickup=al, min=None, max=carga_min_real,
+                             viavel=None, temporizacao=None,
+                             limite_superior=carga_min_real, alertas=aa)
     funcoes['slope'] = dict(calculado=False, por_fabricante=dict(SLOPE_87B_POR_FABRICANTE),
                             observacao='parâmetro do IED: seguir o manual do fabricante e o '
                                        'estudo de saturação dos TCs')
 
     # --- 50BF e EFP por vão de linha ---
     bf, efp = {}, {}
+    falhas = []
     linhas = [r for r in inc if not e_trafo(r)]
+    conf = getattr(model, '_leitura_conferida', None)
     for L in linhas:
-        br = S0._find_branch(*L)
-        z1L = complex(br['R1'], br['X1']) / 100
-        z0L = (complex(br['R0'], br['X0']) / 100
-               if br.get('R0') is not None and br.get('X0') is not None else None)
         rem = outro(L)
-        SL = _solver(model, [L], modo, manter_reatores=[L])
         c50, cef_l = [], []
-        Z1, _, Z0 = SL.zth(barra)
-        Zr1, _, Zr0 = SL.zth(rem)
-        Ibr = SB / (np.sqrt(3) * model.bus_kv.get(rem, kv))
         for k in kinds:
-            v = _i_aberto(Z1, Z0, z1L, z0L, 1.0, k, Ib, SL._fator_fc(barra, k))
-            if v: c50.append((v, f'falta na extremidade oposta, remoto aberto, rede normal, {k}'))
-            v = _i_aberto(Zr1, Zr0, z1L, z0L, 1.0, k, Ibr, SL._fator_fc(rem, k))
-            if v: cef_l.append((v, f'alimentação pelo terminal remoto, rede normal, {k}'))
+            # 50BF: falta na extremidade oposta com o terminal remoto aberto (rede normal)
+            try:
+                v = S0.line_end_open(L[0], L[1], L[2], barra, k, p=1.0)
+                if v:
+                    c50.append((v * 1000.0,
+                                f'falta na extremidade oposta, remoto aberto, rede normal, {k}'))
+            except Exception as ex:
+                falhas.append(f'50BF {nome(L)} rede normal {k}: {type(ex).__name__}')
+            # EFP lado da linha: disjuntor local aberto, falta junto a ele, alimentação remota
+            try:
+                v = S0.line_end_open(L[0], L[1], L[2], rem, k, p=1.0)
+                if v:
+                    cef_l.append((v * 1000.0,
+                                  f'disjuntor local aberto, alimentação pelo terminal remoto, {k}'))
+            except Exception as ex:
+                falhas.append(f'EFP {nome(L)} {k}: {type(ex).__name__}')
         for F in inc:
             if F == L:
                 continue
-            drop = [x for x in inc if x != F]
-            try:
-                SF = _solver(model, drop, modo, manter_reatores=[L],
-                             drop_reatores_barra=[barra])
-            except Exception:
-                continue
-            Z1, _, Z0 = SF.zth(barra)
+            # alimentação local só por F; a linha L fica, e é aberta no terminal remoto
+            SF = Solver(model, drop_branches=[x for x in inc if x not in (F, L)],
+                        drop_reatores_barra=[barra], modo=modo)
+            if modo == 'completo':
+                if conf:
+                    SF.validado_completo = True
+                    SF._selo_completo = dict(conf, conferido_no_caso=True)
+                else:
+                    SF.liberar_completo_sem_gabarito('cenário de alimentação fraca')
             for k in kinds:
-                v = _i_aberto(Z1, Z0, z1L, z0L, 1.0, k, Ib, SF._fator_fc(barra, k))
-                if v: c50.append((v, f'extremidade oposta, remoto aberto, só {nome(F)}, {k}'))
+                try:
+                    v = SF.line_end_open(L[0], L[1], L[2], barra, k, p=1.0)
+                except Exception as ex:
+                    falhas.append(f'50BF {nome(L)} só {nome(F)} {k}: {type(ex).__name__}')
+                    continue
+                if v:
+                    c50.append((v * 1000.0,
+                                f'extremidade oposta, remoto aberto, só {nome(F)}, {k}'))
         cef_b = [(recomp[F][k] * 1000.0, f'alimentação só por {nome(F)}, {k}')
                  for F in recomp if F != L for k in kinds
                  if recomp[F].get(k) and recomp[F][k] * 1000.0 > I_DESENERGIZADA]
@@ -3457,6 +3747,15 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
                                 condicao=cb, alertas=eb) if ib_ else None))
     funcoes['50BF'] = bf
     funcoes['EFP'] = efp
+    conferido = bool(getattr(model, '_leitura_conferida', None)) or not S0._tem_fc() \
+        or modo != 'completo'
+    for nomef in ('87B', 'checkzone', 'alarme'):
+        funcoes[nomef]['estado'] = _estado(funcoes[nomef], conferido)
+    funcoes['slope']['estado'] = 'modelo_nao_suportado'
+    for grupo in (bf, efp):
+        for v in grupo.values():
+            for f in ([v] if 'pickup' in v else [x for x in v.values() if isinstance(x, dict)]):
+                f['estado'] = _estado(f, conferido)
 
     prem += [
         f'corrente mínima na barra: menor entre rede completa, N-1 de cada equipamento '
@@ -3468,10 +3767,11 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
         'condições que deixam a barra sem alimentação são desconsideradas',
         f"87B: acima da carga de emergência e abaixo do curto mínimo; sugerido "
         f"{crit['f_icc']:.0%} do curto mínimo; se a faixa não existir, prevalece o curto",
-        f"checkzone: {crit['f_checkzone']:.0%} do pickup do 87B",
-        f"alarme: {crit['f_alarme']:.0%} do pickup do 87B, abaixo da menor carga nominal "
-        f"dos vãos; o limite inferior (acima do diferencial permanente) e a temporização "
-        f"dependem dos TCs e não foram verificados",
+        "checkzone: faixa própria — acima do piso de medição e abaixo do teto de "
+        "sensibilidade para toda falta interna; sem escala fixa em relação ao 87B",
+        "alarme de TC aberto: abaixo da menor corrente REAL conduzida pelos vãos nos "
+        "cenários do ANAREDE; limite inferior (diferencial permanente) e temporização "
+        "dependem dos TCs e não foram verificados",
         f"50BF: acima da carga nominal do vão e abaixo da falta na extremidade oposta com o "
         f"terminal remoto aberto, na alimentação local mais fraca; sugerido "
         f"{crit['f_icc']:.0%} dessa corrente. Disparos sem corrente de falta (sobretensão, "
@@ -3499,9 +3799,12 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
         faltantes.append('in_tc_ref')
     if not cenarios:
         faltantes.append('casos do ANAREDE (carga de emergência por vão)')
-    return dict(barra=barra, nome=model.bus_name.get(barra, ''), kv=kv, modo=modo,
+    res = dict(barra=barra, nome=model.bus_name.get(barra, ''), kv=kv, modo=modo,
                 funcoes=funcoes, cargas=cargas, premissas=prem, faltantes=faltantes,
+                falhas=falhas,
                 funcoes_sm211=funcoes_exigidas('barra'))
+    res['exportacao'] = politica_exportacao(res, perfil_ied)
+    return res
 
 
 # ===================== motor de fluxo de potencia =====================
@@ -3801,10 +4104,12 @@ def curto_por_cenario(ana, cenarios, barras, kinds=('3F', '1FT'), modo='completo
             for k in kinds:
                 try:
                     res[(b, k)] = S.fault(b, k) * 1000.0
-                except Exception:
+                except Exception as ex:
                     res[(b, k)] = None
+                    falhas.append((b, k, type(ex).__name__))
         return res
 
+    falhas = []
     saida = {'despacho': {}, 'por_cenario_max': {}, 'por_cenario_min': {}, 'modo': modo,
              'metodo': ('fontes paradas no cenário do ANAREDE retiradas do caso de '
                         'curto-circuito; impedâncias e topologia inalteradas; geradores '
@@ -3835,6 +4140,11 @@ def curto_por_cenario(ana, cenarios, barras, kinds=('3F', '1FT'), modo='completo
                 extremos[(b, k)] = {'max': vmax, 'min': vmin,
                                     'incerteza_mapeamento_pct': max(faixa) if faixa else None}
     saida['extremos'] = extremos
+    # falha não some: entra no denominador, e um extremo calculado sem todos os cenários
+    # não é declarado completo
+    saida['falhas'] = falhas
+    saida['cenarios_avaliados'] = len(cenarios) * 2
+    saida['completo'] = not falhas
     saida['premissas'] = [
         'tensão pré-falta de 1,0 pu, sem carregamento prévio',
         f'modo {modo}',
@@ -3948,7 +4258,7 @@ def tempo(I, Is, tms=1.0, curva=CURVA_PADRAO, norma=NORMA_PADRAO):
     array de correntes.
     """
     A, B, C = constantes(curva, norma)
-    k = 1.0 / 7.0 if (norma or NORMA_PADRAO).upper() == 'IEEE' else 1.0
+    k = _FATOR_IED.get((norma or NORMA_PADRAO).upper(), 1.0)
     m = np.asarray(I, dtype=float) / float(Is)
     with np.errstate(divide='ignore', invalid='ignore'):
         t = k * tms * (A / (m ** B - 1.0) + C)
@@ -3965,7 +4275,7 @@ def tms_para_tempo(I, Is, t_alvo, curva=CURVA_PADRAO, norma=NORMA_PADRAO):
     m = float(I) / float(Is)
     if m <= 1.0:
         raise ValueError(f"I/Is = {m:.3f} não supera o pickup: a unidade não operaria")
-    k = 1.0 / 7.0 if (norma or NORMA_PADRAO).upper() == 'IEEE' else 1.0
+    k = _FATOR_IED.get((norma or NORMA_PADRAO).upper(), 1.0)
     base = k * (A / (m ** B - 1.0) + C)
     if base <= 0:
         raise ValueError("curva degenerada para esta relação I/Is")
@@ -3977,6 +4287,26 @@ def descreve(curva=CURVA_PADRAO, norma=NORMA_PADRAO):
     A, B, C = constantes(curva, norma)
     n = (norma or NORMA_PADRAO).upper(); c = (curva or CURVA_PADRAO).upper()
     return f"{n} {_NOMES.get(c, c)} (A={A}, B={B}, C={C})"
+
+
+_FATOR_IED = {}
+_FONTE_IED = {}
+
+
+def curva_do_ied(fabricante, modelo, nome, A, B, C, fonte, secao, revisao, fator_td=1.0):
+    """Registra a curva documentada de um IED: t = fator_td · TD · [A/((I/Is)^B − 1) + C].
+
+    Exige fonte, seção e revisão do manual: curva sem documento não é usada para ajuste.
+    Devolve (curva, norma) a passar em `tempo`, com norma = 'IED:<FABRICANTE>:<MODELO>'.
+    """
+    for campo, v in (('fonte', fonte), ('secao', secao), ('revisao', revisao)):
+        if not v:
+            raise ValueError(f"curva de IED sem {campo}: registro recusado")
+    norma = f"IED:{fabricante}:{modelo}".upper()
+    CURVAS.setdefault(norma, {})[nome.upper()] = (A, B, C)
+    _FATOR_IED[norma] = float(fator_td)
+    _FONTE_IED[(norma, nome.upper())] = dict(fonte=fonte, secao=secao, revisao=revisao)
+    return nome.upper(), norma
 
 
 # ===================== Submodulo 2.11 =====================
@@ -4304,7 +4634,7 @@ def orientacao(imprimir=True):
 
 # ===================== submódulos como espaços de nome =====================
 import types as _types
-curvas = _types.SimpleNamespace(CURVAS=CURVAS, CURVA_PADRAO=CURVA_PADRAO, NORMA_PADRAO=NORMA_PADRAO, constantes=constantes, descreve=descreve, tempo=tempo, tms_para_tempo=tms_para_tempo)
+curvas = _types.SimpleNamespace(CURVAS=CURVAS, CURVA_PADRAO=CURVA_PADRAO, NORMA_PADRAO=NORMA_PADRAO, constantes=constantes, curva_do_ied=curva_do_ied, descreve=descreve, tempo=tempo, tms_para_tempo=tms_para_tempo)
 sm211 = _types.SimpleNamespace(FUNCOES=FUNCOES, TEMPOS=TEMPOS, exige_stub=exige_stub, funcoes_exigidas=funcoes_exigidas, tempo_maximo=tempo_maximo, verificar_escopo=verificar_escopo)
 dados_externos = _types.SimpleNamespace(CATALOGO=CATALOGO, EXIGIDOS=EXIGIDOS, RELATORIO=RELATORIO, da_base=da_base, faltantes=faltantes)
 fluxo = _types.SimpleNamespace(SEM_LIMITE=SEM_LIMITE, aplicar_despacho=aplicar_despacho, balanco=balanco, carga_maxima=carga_maxima, carregamento=carregamento, corrente_nominal=corrente_nominal, curto_por_cenario=curto_por_cenario, envelope_cenarios=envelope_cenarios, fluxos=fluxos, tensao_barra=tensao_barra)

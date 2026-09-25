@@ -68,19 +68,31 @@ PROTOCOLO DE TRABALHO — vale para toda chamada, sem precisar ser repetido no p
    capacidade limita o equipamento e pode atuar em contingência. O fluxo do ANAREDE é
    informação, não base de ajuste. Critérios completos em docs/metodologia-protecao.md.
 
-6. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
+6. REPORTE ESTADO E FALHAS. Cada função de ajuste traz `estado` —
+   calculavel_verificada, faixa_inviavel, dados_faltantes, modelo_nao_suportado,
+   validacao_pendente ou erro_execucao — e os estudos trazem `falhas`. Apresente o estado
+   de cada item ao usuário; nunca mostre faixa sem estado nem omita uma falha. Um resultado
+   em validacao_pendente não é resultado aprovado.
+
+7. CRITÉRIOS DO USUÁRIO VÊM DO PEDIDO. Múltiplos de carga, escalas entre funções e
+   margens de filosofia não têm padrão no código: se o usuário os informar, passe-os em
+   `criterios`; se não, apresente a faixa admissível e diga que o critério falta. Ajuste
+   de relé só é exportável com perfil de IED documentado (`perfil_ied`); sem ele, o
+   resultado é insumo de estudo — diga isso ao usuário.
+
+8. Não invente dado ausente. Relação de TC, ajuste de IED, placa de equipamento,
    capacidade de interrupção e carga máxima operativa NÃO estão no .ANA. As funções de
    alto nível devolvem `dados_faltantes` com o que falta e o critério que cada item
    bloqueia — reporte a lista em vez de estimar.
 
-7. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
+9. Declare o modo. 'completo' (padrão) inclui a contribuição de eólicas e fotovoltaicas
    conectadas por conversor; 'sincronas' é o Thévenin puro. Perto dessas usinas a
    diferença passa de 40%. Não misture os dois num mesmo critério.
 
-8. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
+10. Correntes saem em kA PRIMÁRIOS. Com TC, a corrente de base do estudo é a nominal
    primária do TC, não a do equipamento protegido.
 
-9. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
+11. Três armadilhas de modelagem: o identificador de circuito é STRING ('1', não 1); um
    banco de três enrolamentos exige remover TODAS as pernas do nó-estrela; e se o
    equipamento novo já está na base, o cenário "antes" é o contrafactual — remova-o.
 

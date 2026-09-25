@@ -302,6 +302,30 @@ barra não entram. Slope: valores de partida declarados, não calculados.
 O estudo fatora cada topologia uma vez; a Zbarra entre as fontes de conversor fica em cache
 por topologia. Numa base do SIN, alguns minutos.
 
+## Estado de solução e topologias derivadas
+
+Toda grandeza derivada de uma falta — corrente de ramo, tensão de barra, falta
+intermediária, terminal aberto — vem de UM estado de solução. No modo completo a sequência
+positiva é o estado convergido com as fontes de conversor; as sequências negativa e zero
+são as respostas das redes passivas às correntes desse mesmo estado. Não há fator de escala
+aplicado depois.
+
+`branch_current` devolve módulos, fasores complexos (`fasores`), o sentido positivo
+(`sentido`) e `I3I0`. A sequência zero numa linha considera o acoplamento mútuo; num
+transformador, a conexão dos enrolamentos; num banco com N unidades, a corrente é agregada
+e `Imax_por_unidade` vem à parte.
+
+Topologias derivadas (`_derivado`) herdam todo o cenário de origem: ramos, geradores e
+reatores retirados, reatores mantidos, bypass de capacitores, charging, modo e conferência.
+O terminal aberto é topologia real: a linha fica pendurada no terminal fechado, com os seus
+reatores, terminando num nó fictício na ponta aberta.
+
+Capacitor série tem dois estados distintos: em `drop_branches` o banco sai e o circuito
+abre; em `bypass_capacitores` o banco é curto-circuitado e a linha segue sem compensação.
+
+Resultados trazem `estado` e os estudos trazem `falhas`. Impedância equivalente nula ou
+indefinida levanta erro em vez de devolver infinito.
+
 ## Premissas declaradas
 
 Toda função de alto nível — `impacto_entrada`, `relatorio_curto`, `relatorio_protecao`,

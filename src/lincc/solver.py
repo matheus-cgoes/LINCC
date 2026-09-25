@@ -25,7 +25,7 @@ class Solver:
     def __init__(self, model, drop_branches=None, drop_gens=None, block_btb=True,
                  dispatch_file=None,   # despacho inferido OBSOLETO: estados do DBAR ('d') cobrem o caso
                  charging=False, modo='completo', manter_reatores=None,
-                 drop_reatores_barra=None):
+                 drop_reatores_barra=None, bypass_capacitores=None):
         """`charging`: representar a capacitância de linha (campos S1 e S0), em π.
 
         PADRÃO DESLIGADO, e a razão é medida. O relatório de impedâncias de barra do
@@ -51,6 +51,12 @@ class Solver:
         # Barras cujos reatores de barra estão desligados no cenário — o reator é um vão
         # da subestação e sai, por exemplo, na recomposição por um só elemento.
         self.dropH = set(drop_reatores_barra or [])
+        # Capacitor série tem dois estados físicos distintos: em drop_branches o banco sai e
+        # o circuito ABRE; em bypass_capacitores o banco é curto-circuitado e a linha segue
+        # contínua sem a compensação. São cenários diferentes e não se confundem.
+        self.bypassC = {(a, b, str(c)) for a, b, c in (bypass_capacitores or [])}
+        self.block_btb_arg = block_btb
+        self.dropG_arg = drop_gens
         if modo not in ('sincronas', 'completo'):
             raise ValueError(f"modo deve ser 'sincronas' ou 'completo', recebido {modo!r}")
         # Modo global da instância: toda grandeza calculada por este Solver segue este
@@ -150,7 +156,10 @@ class Solver:
         for c in self.M.caps:
             bf,bt=c['bf'],c['bt']
             if bf not in IDX or bt not in IDX: continue
+            kc=(bf,bt,str(c.get('nc','1'))); kr=(bt,bf,kc[2])
+            if kc in self.dropB or kr in self.dropB: continue      # banco aberto
             x=(c['X1'] or 0)/100
+            if kc in self.bypassC or kr in self.bypassC: x=1e-6   # banco em bypass
             if abs(x)<1e-12 or not np.isfinite(x): continue
             i,j=IDX[bf],IDX[bt]; ys=1/(1j*x)
             YP[i,j]-=ys; YP[j,i]-=ys; YP[i,i]+=ys; YP[j,j]+=ys
@@ -277,7 +286,10 @@ class Solver:
         for c in M.caps:
             bf,bt=c['bf'],c['bt']
             if bf not in IDX0 or bt not in IDX0: continue
+            kc=(bf,bt,str(c.get('nc','1'))); kr=(bt,bf,kc[2])
+            if kc in self.dropB or kr in self.dropB: continue      # banco aberto
             x=(c['X0'] or 0)/100
+            if kc in self.bypassC or kr in self.bypassC: x=1e-6   # banco em bypass
             if abs(x)<1e-12 or not np.isfinite(x): continue
             i,j=IDX0[bf],IDX0[bt]; ys=1/(1j*x)
             Y[i,j]-=ys; Y[j,i]-=ys; Y[i,i]+=ys; Y[j,j]+=ys
@@ -388,6 +400,7 @@ class Solver:
         grupos={}
         for kseg in par: grupos.setdefault(find(kseg),[]).append(kseg)
         gmax=0
+        self._gmut={}; self._Zseg=dict(Zseg)
         for segs in grupos.values():
             n=len(segs); gmax=max(gmax,n)
             idx={s:i for i,s in enumerate(segs)}
@@ -400,6 +413,9 @@ class Solver:
                 Yp=np.linalg.inv(Zp)
             except np.linalg.LinAlgError:
                 continue
+            g=(segs, idx, Yp, seg_nodes)       # referência compartilhada, sem cópia por segmento
+            for s in segs:
+                self._gmut[s]=g
             dY=Yp.copy()
             for s in segs: dY[idx[s],idx[s]]-=1/seg_z[s]
             nod=[(IDX0[seg_nodes[s][0]],IDX0[seg_nodes[s][1]]) for s in segs]
@@ -488,6 +504,13 @@ class Solver:
         Z1,Z2,Z0=self.zth(bus)
         if Z1 is None: return None
         zf=complex(Zf)
+        den={'3F':Z1+zf,'2F':Z1+Z2+2*zf,
+             '1FT':(Z1+Z2+Z0+3*zf) if Z0 is not None else None}.get(kind)
+        if den is not None and (abs(den)<1e-12 or not np.isfinite(den)):
+            # impedância equivalente nula ou indefinida: ressonância no modelo ou curto
+            # franco já presente. Um valor infinito ou nulo não é resultado válido.
+            raise ValueError(f"falta {kind} em {bus}: impedância equivalente nula ou "
+                             f"indefinida (ressonância série no modelo?)")
         if kind=='3F':
             I=abs(Vf/(Z1+zf))
         elif kind=='1FT':
@@ -736,10 +759,15 @@ class Solver:
         if cache is None:
             todas = sorted({self.IDXP[b] for b in self._fc_sources() if b in self.IDXP})
             N = len(self.BLP)
-            E = np.zeros((N, len(todas)), dtype=complex)
-            for c, j in enumerate(todas):
-                E[j, c] = 1
-            Z = self.luP.solve(E)[todas, :]
+            n = len(todas)
+            Z = np.empty((n, n), dtype=complex)
+            BLOCO = 32      # resolve em blocos: a coluna completa tem N linhas, só n interessam
+            for c0 in range(0, n, BLOCO):
+                cols = todas[c0:c0 + BLOCO]
+                E = np.zeros((N, len(cols)), dtype=complex)
+                for c, j in enumerate(cols):
+                    E[j, c] = 1
+                Z[:, c0:c0 + len(cols)] = self.luP.solve(E)[todas, :]
             cache = self._zfontes = ({j: c for c, j in enumerate(todas)}, Z)
         pos, Z = cache
         sel = [pos[j] for j in idxs]
@@ -1109,83 +1137,219 @@ class Solver:
         V0=(-Z0col*Ia0) if (Z0col is not None and Ia0!=0) else None
         return dict(V1=V1,V2=V2,V0=V0,Ia1=Ia1,Ia2=Ia2,Ia0=Ia0,Z1ff=Z1ff,Z0ff=Z0ff)
 
+    CACHE_DERIVADOS_MAX = 4     # topologias derivadas guardadas por instância (~160 MB cada)
+
+    def _cache_guardar(self, chave, valor):
+        """Guarda uma topologia derivada, descartando a mais antiga acima do limite."""
+        cache = self.__dict__.setdefault('_cache_derivados', {})
+        while len(cache) >= self.CACHE_DERIVADOS_MAX:
+            cache.pop(next(iter(cache)))
+        cache[chave] = valor
+        return valor
+
+    def _clone_model(self):
+        """Cópia do caso com listas e dicionários próprios, para montar topologia derivada
+        sem alterar o caso original."""
+        import copy as _c
+        Mm = _c.copy(self.M)
+        for k in ('branches', 'shunts', 'shl', 'gens', 'caps', 'mutuas', 'svc', 'zig'):
+            if hasattr(self.M, k):
+                setattr(Mm, k, list(getattr(self.M, k)))
+        for k in ('bus_kv', 'bus_name', 'deol'):
+            if hasattr(self.M, k):
+                setattr(Mm, k, dict(getattr(self.M, k)))
+        if hasattr(self.M, 'eol'):
+            Mm.eol = set(self.M.eol)
+        return Mm
+
+    def _derivado(self, Mm=None, drop_extra=(), manter_extra=(), dropH_extra=(), modo=None):
+        """Solver derivado desta instância, herdando TUDO o que define o cenário: ramos,
+        geradores e reatores retirados, reatores mantidos, bypass de capacitores, charging,
+        modo e a conferência do caso. Uma topologia derivada nunca reintroduz um elemento
+        que o cenário de origem tirou."""
+        S2 = Solver(Mm if Mm is not None else self.M,
+                    drop_branches=list(self.dropB) + list(drop_extra),
+                    drop_gens=list(self.dropG) or None,
+                    block_btb=getattr(self, 'block_btb_arg', True),
+                    charging=self.charging, modo=self._modo(modo),
+                    manter_reatores=list(self.manterShl) + list(manter_extra),
+                    drop_reatores_barra=list(self.dropH) + list(dropH_extra),
+                    bypass_capacitores=list(self.bypassC))
+        S2.factor(avisar=False)
+        if S2.modo == 'completo' and S2._tem_fc():
+            S2.validado_completo = bool(getattr(self, 'validado_completo', False))
+            S2._selo_completo = getattr(self, '_selo_completo', None)
+        return S2
+
+    def _perfil(self, fault_bus, kind='3F', Zf=0.0, modo=None):
+        """Perfis de sequência (V1, V2, V0 e Ia1, Ia2, Ia0) de UM estado de solução.
+
+        No modo completo a sequência positiva é o estado convergido com as fontes de
+        conversor, e as sequências negativa e zero são as respostas das redes passivas às
+        correntes desse mesmo estado. Correntes de ramo e tensões derivadas daqui são
+        consistentes entre si — não há fator de escala aplicado depois.
+        """
+        prof = self._seq_profile(fault_bus, kind, Zf)
+        if prof is None or not (self._modo(modo) == 'completo' and self._tem_fc()):
+            return prof
+        self._exigir_validacao_completo()
+        Z1, Z2, Z0 = self.zth(fault_bus)
+        zf = complex(Zf)
+        if kind == '3F':
+            zeq, r2, r0 = zf, 0, 0
+        elif kind == '2F':
+            zeq, r2, r0 = Z2 + 2 * zf, -1, 0
+        elif kind == '1FT':
+            zeq, r2, r0 = Z2 + Z0 + 3 * zf, 1, 1
+        else:
+            z0f = Z0 + 3 * zf
+            zeq = Z2 * z0f / (Z2 + z0f)
+            r2, r0 = -z0f / (Z2 + z0f), -Z2 / (Z2 + z0f)
+        Vst, Ia1, _ = self._estado_fc_robusto(fault_bus, Zf=zeq)
+        Ia2, Ia0 = r2 * Ia1, r0 * Ia1
+        V2 = prof['V2'] * (Ia2 / prof['Ia2']) if abs(prof['Ia2']) > 1e-12 else prof['V2'] * 0
+        V0 = (prof['V0'] * (Ia0 / prof['Ia0']) if (prof['V0'] is not None
+                                                  and abs(prof['Ia0']) > 1e-12)
+              else (prof['V0'] * 0 if prof['V0'] is not None else None))
+        out = dict(prof)
+        out.update(V1=Vst, V2=V2, V0=V0, Ia1=Ia1, Ia2=Ia2, Ia0=Ia0)
+        return out
+
+    def _i0_linha(self, V0, br, de):
+        """Corrente de sequência zero numa linha, saindo do terminal `de`.
+
+        Linha segmentada por acoplamento mútuo: usa um segmento livre de mútua, onde a
+        corrente é a queda de tensão sobre a impedância do próprio segmento; se todos os
+        segmentos estão acoplados, aplica a matriz primitiva do grupo. Sem isso a corrente
+        seria a queda total sobre a impedância total, o que ignora a tensão induzida.
+        """
+        k = self.lt_key(br['bf'], br['bt'], br['nc'])
+        cortes = getattr(self, 'cortes', {})
+        z0 = zfin(br.get('R0'), br.get('X0'))
+        para = br['bt'] if de == br['bf'] else br['bf']
+        gm = getattr(self, '_gmut', {})
+
+        def pelo_grupo(n1, n2, ks, sinal):
+            grupo, idx, Yp, nos = gm[ks]
+            dv = np.array([V0[self.I0P[nos[g][0]]] - V0[self.I0P[nos[g][1]]] for g in grupo])
+            i_can = (Yp @ dv)[idx[ks]]                 # sentido canônico (menor -> maior)
+            return sinal * (i_can if (n1, n2) == ks[:2] else -i_can)
+
+        # linha acoplada em TODO o comprimento: um único segmento, sem nós auxiliares
+        ks_inteira = ((de, para) if de < para else (para, de)) + (k,)
+        if ks_inteira in gm:
+            return pelo_grupo(de, para, ks_inteira, 1)
+        if k not in cortes or k not in self.direc:
+            if z0 is None or de not in self.I0P or para not in self.I0P:
+                return 0j
+            return (V0[self.I0P[de]] - V0[self.I0P[para]]) / z0
+        a0, b0 = self.direc[k]
+        ps = sorted(cortes[k])
+        sinal = 1 if de == a0 else -1                 # corrente no sentido a0 -> b0
+        segs = []
+        for s in range(len(ps) - 1):
+            n1 = self.aux.get((a0, b0, k[2], ps[s])); n2 = self.aux.get((a0, b0, k[2], ps[s + 1]))
+            zs = self._Zseg.get((n1, n2, k, ps[s], ps[s + 1])) or \
+                 self._Zseg.get((n2, n1, k, ps[s], ps[s + 1]))
+            if n1 is None or n2 is None or zs is None:
+                continue
+            segs.append((n1, n2, zs))
+        for n1, n2, zs in segs:
+            ks = ((n1, n2) if n1 < n2 else (n2, n1)) + (k,)
+            if ks not in gm:
+                return sinal * (V0[self.I0P[n1]] - V0[self.I0P[n2]]) / zs
+        if not segs:
+            return 0j
+        n1, n2, _ = segs[0]
+        ks = ((n1, n2) if n1 < n2 else (n2, n1)) + (k,)
+        return pelo_grupo(n1, n2, ks, sinal)
+
     def _find_branch(self, bf, bt, nc):
         for b in self.M.branches:
             if b['nc']==nc and {b['bf'],b['bt']}=={bf,bt}: return b
         return None
 
     def branch_current(self, fault_bus, bf, bt, nc, kind='3F', Zf=0.0, modo=None):
-        """Corrente de fase (kA primarios) num ramo QUALQUER para uma falta em fault_bus.
-        Funciona para ramo incidente, a N barras de distancia, ou uma linha qualquer.
-        Para LINHAS calcula as tres sequencias; para TRAFOS retorna so seq positiva
-        (o I0 de enrolamento nao e serie simples entre as mesmas barras).
+        """Correntes num ramo para uma falta em `fault_bus`, em kA primários.
 
-        Respeita o MODO da instancia. O perfil de sequencias e resolvido na rede passiva;
-        no modo completo o resultado e escalado pela razao medida na barra em falta, que
-        e o efeito das fontes de conversor."""
-        prof=self._seq_profile(fault_bus, kind, Zf)
-        if prof is None: return None
-        br=self._find_branch(bf,bt,nc)
-        if br is None: return None
-        if (br['bf'],br['bt'],br['nc']) in self.dropB: return None
-        i,j=br['bf'],br['bt']
-        kvb=self.M.bus_kv.get(i,0) or self.M.bus_kv.get(j,0)
-        if not kvb: return None
-        Ib=SB/(np.sqrt(3)*kvb)
-        z1=complex(br['R1'],br['X1'])/100 if br['R1'] is not None else None
-        z0=complex(br['R0'],br['X0'])/100 if (br.get('R0') is not None and br.get('X0') is not None) else None
-        def dI(V,IDX,z):
-            if V is None or z is None or abs(z)<1e-12: return 0j
-            if i not in IDX or j not in IDX: return 0j
-            return (V[IDX[i]]-V[IDX[j]])/z
-        I1=dI(prof['V1'],self.IDXP,z1); I2=dI(prof['V2'],self.IDXP,z1)
-        I0=dI(prof['V0'],self.I0P,z0) if br['tipo']=='L' else 0j
-        a=np.exp(2j*np.pi/3)
-        Ia=I0+I1+I2; Ib2=I0+a*a*I1+a*I2; Ic=I0+a*I1+a*a*I2
-        f=self._fator_fc(fault_bus, kind, modo)
-        return dict(Ia=abs(Ia)*Ib*f,Ib=abs(Ib2)*Ib*f,Ic=abs(Ic)*Ib*f,
-                    Imax=max(abs(Ia),abs(Ib2),abs(Ic))*Ib*f,
-                    I1=abs(I1)*Ib*f,I2=abs(I2)*Ib*f,I0=abs(I0)*Ib*f,kV=kvb,
-                    seqonly=(br['tipo']!='L'), modo=self._modo(modo), fator_fc=f)
+        Sentido positivo: saindo de `bf` em direção a `bt`, como pedido na chamada.
+        Tudo vem de UM estado de solução (`_perfil`): no modo completo, o estado convergido
+        com as fontes de conversor; nenhum fator de escala é aplicado depois.
+
+        Linha: três sequências, com a sequência zero recuperada considerando o acoplamento
+        mútuo. Transformador: positiva e negativa pelo ramo e sequência zero pela conexão
+        dos enrolamentos (`corrente_seq0_ramo`); banco com N unidades em paralelo devolve a
+        corrente AGREGADA e, à parte, a por unidade. Capacitor série também é aceito.
+
+        Devolve módulos (Ia, Ib, Ic, Imax, I1, I2, I0, I3I0), fasores complexos (`fasores`)
+        e o `modo`.
+        """
+        prof = self._perfil(fault_bus, kind, Zf, modo)
+        if prof is None:
+            return None
+        br = self._find_branch(bf, bt, nc)
+        if br is None:
+            for c in getattr(self.M, 'caps', []):
+                if str(c.get('nc', '1')) == str(nc) and {c['bf'], c['bt']} == {bf, bt}:
+                    br = dict(c, tipo='S', R1=0.0, R0=0.0)
+                    break
+        if br is None:
+            return None
+        if (br['bf'], br['bt'], br['nc']) in self.dropB or \
+                (br['bt'], br['bf'], br['nc']) in self.dropB:
+            return None
+        de, para = (bf, bt)
+        kvb = self.M.bus_kv.get(de, 0) or self.M.bus_kv.get(para, 0)
+        if not kvb:
+            return None
+        Ib = SB / (np.sqrt(3) * kvb)
+        z1 = zfin(br.get('R1'), br.get('X1'))
+        nun = (br.get('nunop', 1) or 1) if br['tipo'] == 'T' else 1
+
+        def dI(V, IDX, z):
+            if V is None or z is None or abs(z) < 1e-12:
+                return 0j
+            if de not in IDX or para not in IDX:
+                return 0j
+            return (V[IDX[de]] - V[IDX[para]]) / z
+        I1 = dI(prof['V1'], self.IDXP, z1) * nun
+        I2 = dI(prof['V2'], self.IDXP, z1) * nun
+        if prof['V0'] is None:
+            I0 = 0j
+        elif br['tipo'] == 'L':
+            I0 = self._i0_linha(prof['V0'], br, de)
+        elif br['tipo'] == 'T':
+            I0 = -self.corrente_seq0_ramo(prof['V0'], br, de)
+        else:
+            I0 = dI(prof['V0'], self.I0P, zfin(br.get('R0'), br.get('X0')))
+        a = np.exp(2j * np.pi / 3)
+        Ia = I0 + I1 + I2; Ibf = I0 + a * a * I1 + a * I2; Ic = I0 + a * I1 + a * a * I2
+        m = lambda x: abs(x) * Ib
+        out = dict(Ia=m(Ia), Ib=m(Ibf), Ic=m(Ic), Imax=max(m(Ia), m(Ibf), m(Ic)),
+                   I1=m(I1), I2=m(I2), I0=m(I0), I3I0=3 * m(I0), kV=kvb,
+                   fasores=dict(Ia=Ia * Ib, Ib=Ibf * Ib, Ic=Ic * Ib,
+                                I1=I1 * Ib, I2=I2 * Ib, I0=I0 * Ib),
+                   sentido=f'de {de} para {para}', modo=self._modo(modo),
+                   seqonly=False)
+        if nun > 1:
+            out['unidades'] = nun
+            out['Imax_por_unidade'] = out['Imax'] / nun
+        return out
 
     def bus_voltage(self, fault_bus, obs_bus, kind='3F', Zf=0.0, modo=None):
         """Tensões de fase e fase-fase (pu) numa barra observada durante uma falta.
 
-        Segue o MODO da instância. No modo completo a sequência positiva vem do estado
-        convergido com as fontes de conversor — que sustentam a tensão durante a falta — e
-        as sequências negativa e zero vêm das correntes desse estado aplicadas às redes
-        passivas. Calcular em Thévenin puro subestima a tensão no relé, o que afeta
-        diretamente a verificação de 51V e a impedância aparente de distância.
-
-        Devolve módulos (Va, Vb, Vc, V1, V2, V0), fasores (Va_c, Vb_c, Vc_c, V1_c, V0_c) e
-        Vff_min — a menor tensão fase-fase, em pu da tensão fase-fase nominal.
+        Mesmo estado de solução de `branch_current` (`_perfil`): no modo completo, a
+        sequência positiva vem do estado convergido com as fontes de conversor.
+        Devolve módulos, fasores e Vff_min — a menor tensão fase-fase, em pu da nominal.
         """
-        prof = self._seq_profile(fault_bus, kind, Zf)
+        prof = self._perfil(fault_bus, kind, Zf, modo)
         if prof is None or obs_bus not in self.IDXP:
             return None
         io = self.IDXP[obs_bus]
         V1 = prof['V1'][io]; V2 = prof['V2'][io]
         V0 = prof['V0'][self.I0P[obs_bus]] if (prof['V0'] is not None
                                                  and obs_bus in self.I0P) else 0j
-        if self._modo(modo) == 'completo' and self._tem_fc():
-            self._exigir_validacao_completo()
-            Z1, Z2, Z0 = self.zth(fault_bus)
-            zf = complex(Zf)
-            if kind == '3F':
-                zeq, r2, r0 = zf, 0, 0
-            elif kind == '2F':
-                zeq, r2, r0 = Z2 + 2 * zf, -1, 0
-            elif kind == '1FT':
-                zeq, r2, r0 = Z2 + Z0 + 3 * zf, 1, 1
-            else:
-                z0f = Z0 + 3 * zf
-                zeq = Z2 * z0f / (Z2 + z0f)
-                r2, r0 = -z0f / (Z2 + z0f), -Z2 / (Z2 + z0f)
-            Vst, Ia1, _ = self._estado_fc_robusto(fault_bus, Zf=zeq)
-            V1 = Vst[io]
-            # redes passivas são lineares: escala a resposta de sequência pela corrente
-            V2 = prof['V2'][io] * (r2 * Ia1 / prof['Ia2']) if abs(prof['Ia2']) > 1e-12 else 0j
-            V0 = (V0 * (r0 * Ia1 / prof['Ia0']) if abs(prof['Ia0']) > 1e-12 else 0j)
         a = np.exp(2j * np.pi / 3)
         Va = V0 + V1 + V2; Vb = V0 + a * a * V1 + a * V2; Vc = V0 + a * V1 + a * a * V2
         vff = min(abs(Va - Vb), abs(Vb - Vc), abs(Vc - Va)) / np.sqrt(3)
@@ -1193,88 +1357,67 @@ class Solver:
                     Va_c=Va, Vb_c=Vb, Vc_c=Vc, V1_c=V1, V0_c=V0, Vff_min=vff,
                     modo=self._modo(modo))
 
-    def line_end_open(self, bf, bt, nc, closed, kind='3F', p=1.0, Zf=0.0,
-                      modo=None):
-        """Falta na linha (bf,bt,nc) com o terminal remoto ABERTO.
+    def _solver_terminal_aberto(self, br, closed):
+        """Solver derivado com a extremidade de `br` oposta a `closed` aberta.
 
-        Condição de abertura sequencial de disjuntor: o terminal oposto já abriu e a
-        falta permanece. Devolve a corrente que atravessa o TC do terminal `closed`, em
-        kA primários.
+        A linha continua ligada ao terminal fechado e passa a terminar num nó fictício na
+        ponta aberta, levando consigo o reator de linha daquela ponta — é como o ANAFAS
+        representa o terminal aberto. Guardado em cache nesta instância.
+        """
+        chave = ('aberto', br['bf'], br['bt'], br['nc'], closed)
+        cache = self.__dict__.setdefault('_cache_derivados', {})
+        if chave in cache:
+            return cache[chave]
+        Mm = self._clone_model()
+        X = max(Mm.bus_kv) + 1
+        aberta = br['bt'] if closed == br['bf'] else br['bf']
+        Mm.bus_kv[X] = self.M.bus_kv.get(aberta, 0) or self.M.bus_kv.get(closed, 0)
+        Mm.bus_name[X] = 'FIC.ABERTO'
+        nova = dict(br)
+        if aberta == br['bt']:
+            nova['bt'] = X
+        else:
+            nova['bf'] = X
+        Mm.branches = [x for x in Mm.branches if x is not br] + [nova]
+        shl = []
+        for r in Mm.shl:
+            if {r['bf'], r['bt']} == {br['bf'], br['bt']} and str(r.get('nc', '1')) == str(br['nc']):
+                r = dict(r)
+                r['bf'] = X if r['bf'] == aberta else r['bf']
+                r['bt'] = X if r['bt'] == aberta else r['bt']
+            shl.append(r)
+        Mm.shl = shl
+        manter = [(nova['bf'], nova['bt'], nova['nc'])]
+        S2 = self._derivado(Mm, manter_extra=manter)
+        return self._cache_guardar(chave, (S2, X, nova))
 
-        `p` é a posição da falta, medida a partir de `closed`, de 0 a 1:
+    def line_end_open(self, bf, bt, nc, closed, kind='3F', p=1.0, Zf=0.0, modo=None):
+        """Falta na linha (bf,bt,nc) com o terminal remoto ABERTO. kA primários.
 
-            p → 0    close-in, na cara do disjuntor
-            p = 0.5  meio da linha
-            p = 1    ponta oposta, junto ao terminal aberto (padrão)
-
-        LIMITAÇÃO CONHECIDA. Sem representação de charging, o trecho entre a falta e o
-        terminal aberto não conduz, e a corrente do TC é a da falta. O ANAFAS mantém o
-        trecho pendurado e representa sua capacitância: no caso de referência (falta em
-        6640 com 5570 aberto) a monofásica fecha em −0,41%, mas a trifásica erra −4,11%,
-        porque a capacitância do stub reduz a impedância vista. O erro é conservador para
-        sensibilidade e não conservador para dimensionamento. Ver docs/uso.md.
+        Topologia real: a ponta oposta a `closed` é aberta e a linha fica pendurada no
+        terminal fechado, com os seus reatores. `p` é a posição da falta a partir de
+        `closed`: p → 0 junto ao disjuntor, p = 1 na ponta aberta. Devolve a corrente que
+        atravessa o TC do terminal fechado. Segue o modo da instância; o acoplamento mútuo
+        da linha aberta não é mantido na topologia derivada.
         """
         br = self._find_branch(bf, bt, nc)
         if br is None or br['tipo'] != 'L':
             return None
+        if modo is not None and modo != self.modo:
+            S = Solver(self.M, drop_branches=list(self.dropB), modo=modo,
+                       charging=self.charging, manter_reatores=list(self.manterShl),
+                       drop_reatores_barra=list(self.dropH),
+                       bypass_capacitores=list(self.bypassC))
+            S.validado_completo = getattr(self, 'validado_completo', False)
+            S._selo_completo = getattr(self, '_selo_completo', None)
+            return S.line_end_open(bf, bt, nc, closed, kind, p, Zf)
         p = min(max(float(p), 0.0), 1.0)
-        drop = list(self.dropB) + [(br['bf'], br['bt'], br['nc'])]
-        modo = self._modo(modo)
-        S2 = Solver(self.M, drop_branches=drop, charging=self.charging, modo=modo,
-                    manter_reatores=[(br['bf'], br['bt'], br['nc'])])
-        S2.factor(avisar=False)
-        if modo == 'completo' and S2._tem_fc():
-            # A liberação vem de quem chamou: este é um cenário derivado do mesmo caso.
-            S2.validado_completo = bool(getattr(self, 'validado_completo', False))
-            S2._selo_completo = getattr(self, '_selo_completo', None)
-            S2._exigir_validacao_completo()
-        Z1, _, Z0 = S2.zth(closed)
-        if Z1 is None:
-            return None
-        fator_fc = 1.0
-        if modo == 'completo' and S2._tem_fc():
-            # As fontes de conversor elevam a corrente. Em p→0 o estado é resolvido
-            # direto por fault_fc, que é exato; para p>0 aplica-se a mesma razão ao
-            # Thévenin do ponto, porque a injeção varia pouco ao longo da linha perto do
-            # terminal e a alternativa — resolver o estado num nó intermediário — exige
-            # inserir a barra na rede. Em p=0 o resultado é exato (18.216 A contra 18.211
-            # medidos no caso de referência); ao longo da linha é aproximação declarada.
-            try:
-                base = S2.fault(closed, kind, modo='sincronas')
-                comf = S2.fault_fc(closed, kind)
-                if base and comf:
-                    fator_fc = comf / base
-            except Exception:
-                fator_fc = 1.0
-        z1L = complex(br['R1'], br['X1']) / 100
-        z0L = (complex(br['R0'], br['X0']) / 100
-               if (br.get('R0') is not None and br.get('X0') is not None) else None)
-        kvb = self.M.bus_kv.get(closed, 0)
-        if not kvb:
-            return None
-        Ib = SB / (np.sqrt(3) * kvb); zf = complex(Zf)
-        Z1t = Z1 + p * z1L; Z2t = Z1t
-        if kind == '3F':
-            I = 1 / (Z1t + zf)
-        elif kind == '1FT':
-            if Z0 is None or z0L is None:
-                return None
-            I = 3 / (Z1t + Z2t + (Z0 + p * z0L) + 3 * zf)
-        elif kind == '2F':
-            I = np.sqrt(3) / (Z1t + Z2t + 2 * zf)
-        elif kind == '2FT':
-            if Z0 is None or z0L is None:
-                return None
-            z0t = Z0 + p * z0L + zf
-            z1f, z2f = Z1t + zf, Z2t + zf
-            a = np.exp(2j * np.pi / 3)
-            den = z1f * z2f + z1f * z0t + z2f * z0t
-            ib = (z0t - a * z2f) / den
-            ic = (z0t - a.conjugate() * z2f) / den
-            return np.sqrt(3) * max(abs(ib), abs(ic)) * Ib * fator_fc
-        else:
-            return None
-        return abs(I) * Ib * fator_fc
+        S2, X, nova = self._solver_terminal_aberto(br, closed)
+        if p >= 1.0 - 1e-6:
+            r = S2.branch_current(X, closed, X, nova['nc'], kind, Zf)
+            return r['Imax'] if r else None
+        r = S2.fault_on_branch(closed, X, nova['nc'], p, kind, Zf)
+        return r.get('I_term_%d' % closed) if r else None
 
     def varredura_line_end_open(self, bf, bt, nc, closed, kinds=('3F', '1FT', '2F', '2FT'),
                                 pontos=(0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0)):
@@ -1320,21 +1463,18 @@ class Solver:
         Mm.branches += [seg(p,sbf,F), seg(1-p,F,sbt)]
         has_mut=any({m['bf1'],m['bt1']}=={sbf,sbt} or {m['bf2'],m['bt2']}=={sbf,sbt}
                     for m in self.M.mutuas)
-        S2=Solver(Mm, block_btb=False, charging=self.charging, modo=self._modo(modo))
-        S2.factor(avisar=False)
-        if S2.modo=='completo' and S2._tem_fc():
-            # cenario derivado do mesmo caso: a liberacao acompanha a instancia de origem
-            S2.validado_completo=bool(getattr(self,'validado_completo',False))
-            S2._selo_completo=getattr(self,'_selo_completo',None)
+        chave=('ramo',sbf,sbt,br['nc'],round(p,9))
+        cache=self.__dict__.setdefault('_cache_derivados',{})
+        S2=cache[chave] if chave in cache else self._cache_guardar(chave, self._derivado(Mm))
         out={'kV':kvL,'p':p,'mutua_aprox':has_mut}
-        out['If']=S2.fault(F,kind)
-        ci=S2.branch_current(F, sbf,F,br['nc'],kind)
-        cj=S2.branch_current(F, F,sbt,br['nc'],kind)
+        out['If']=S2.fault(F,kind,Zf=Zf)
+        # corrente que cada terminal fornece à falta: sentido do terminal para o ponto F
+        ci=S2.branch_current(F, sbf,F,br['nc'],kind,Zf)
+        cj=S2.branch_current(F, sbt,F,br['nc'],kind,Zf)
         out['I_term_%d'%sbf]=ci['Imax'] if ci else None
         out['I_term_%d'%sbt]=cj['Imax'] if cj else None
-        if kind=='1FT' and br['tipo']=='L':
-            out['3I0_term_%d'%sbf]=3*ci['I0'] if ci else None
-            out['3I0_term_%d'%sbt]=3*cj['I0'] if cj else None
+        out['3I0_term_%d'%sbf]=ci['I3I0'] if ci else None
+        out['3I0_term_%d'%sbt]=cj['I3I0'] if cj else None
         return out
 
     def fault_on_shunt(self, bus, p, kind='1FT', Zf=0.0, modo=None):
@@ -1363,14 +1503,10 @@ class Solver:
         for k in ('X1','X0'):
             if resid.get(k) is not None and np.isfinite(resid[k]): resid[k]=resid[k]*(1-p)
         Mm.shunts=list(Mm.shunts)+[resid]
-        S2=Solver(Mm, block_btb=False, charging=self.charging, modo=self._modo(modo))
-        S2.factor(avisar=False)
-        if S2.modo=='completo' and S2._tem_fc():
-            # cenario derivado do mesmo caso: a liberacao acompanha a instancia de origem
-            S2.validado_completo=bool(getattr(self,'validado_completo',False))
-            S2._selo_completo=getattr(self,'_selo_completo',None)
-        return {'kV':kvb,'p':p,'If':S2.fault(F,kind),
-                'I_terminal':(lambda c: c['Imax'] if c else None)(S2.branch_current(F,bus,F,'RT',kind))}
+        S2=self._derivado(Mm, modo=modo)
+        return {'kV':kvb,'p':p,'If':S2.fault(F,kind,Zf=Zf),
+                'I_terminal':(lambda c: c['Imax'] if c else None)(
+                    S2.branch_current(F,bus,F,'RT',kind,Zf))}
 
     def winding_ground_fault(self, term_bus, Zw_pct, npts=11, side_seq='0'):
         """Curva simplificada de falta a terra no enrolamento (estrela aterrada) para
@@ -1435,23 +1571,6 @@ class Solver:
         if m not in ('sincronas', 'completo'):
             raise ValueError(f"modo deve ser 'sincronas' ou 'completo', recebido {m!r}")
         return m
-
-    def _fator_fc(self, bus, kind='3F', modo=None):
-        """Razão entre o modo completo e o Thévenin puro na barra, ou 1,0.
-
-        Usado pelas grandezas derivadas do perfil de sequências — corrente de ramo,
-        tensão de barra, falta intermediária — que são calculadas na rede passiva e
-        precisam do efeito das fontes de conversor aplicado.
-        """
-        if self._modo(modo) != 'completo' or not self._tem_fc():
-            return 1.0
-        try:
-            self._exigir_validacao_completo()
-            base = self.fault(bus, kind, modo='sincronas')
-            comf = self.fault_fc(bus, kind)
-            return (comf / base) if (base and comf) else 1.0
-        except Exception:
-            return 1.0
 
     def _tem_fc(self):
         """O caso tem geradores de conversor pleno?

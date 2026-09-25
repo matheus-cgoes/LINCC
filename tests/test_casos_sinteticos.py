@@ -242,8 +242,14 @@ def test_curvas_iec_e_ieee():
     from lincc import tempo, tms_para_tempo
     from lincc.curvas import descreve, constantes
     assert tempo(2000, 400, 1.0) == pytest.approx(3.375, rel=1e-9)          # IEC MI
-    assert tempo(2000, 400, 1.0, norma="IEEE") == pytest.approx(19.61 / 24 / 7 + 0.491 / 7,
-                                                                rel=1e-9)
+    # forma padronizada, sem fator de normalização de fabricante
+    assert tempo(2000, 400, 1.0, norma="IEEE") == pytest.approx(19.61 / 24 + 0.491, rel=1e-9)
+    from lincc.curvas import curva_do_ied
+    with pytest.raises(ValueError):
+        curva_do_ied("X", "Y", "MI", 1, 2, 0, fonte="", secao="1", revisao="A")
+    nome, norma = curva_do_ied("X", "Y", "MI", 13.5, 1.0, 0.0, fonte="manual",
+                               secao="4.2", revisao="B", fator_td=0.5)
+    assert tempo(2000, 400, 1.0, curva=nome, norma=norma) == pytest.approx(3.375 * 0.5)
     assert tempo(300, 400, 1.0) == math.inf                                 # abaixo do pickup
     # o inverso fecha nas duas normas
     for norma in ("IEC", "IEEE"):
@@ -633,9 +639,14 @@ def test_toda_funcao_de_alto_nivel_declara_premissas():
         assert any("pré-falta" in p for p in r["premissas"])
     # o 51 de transformador declara que a referência é a nominal, não a emergência
     trafo = next(b for b in M.branches if b["tipo"] == "T")
-    r = ajuste_sobrecorrente(M, "transformador", (trafo["bf"], trafo["bt"], trafo["nc"]),
-                             dados={"in_nominal": 100.0})
-    assert any("NOMINAL" in p and "emergência" in p for p in r["premissas"])
+    elem = (trafo["bf"], trafo["bt"], trafo["nc"])
+    r = ajuste_sobrecorrente(M, "transformador", elem, dados={"in_nominal": 100.0})
+    assert r["funcoes"]["51"]["pickup"] is None            # sem critério universal de 150%
+    assert "criterio_51_transformador" in r["faltantes"]
+    r = ajuste_sobrecorrente(M, "transformador", elem, dados={"in_nominal": 100.0},
+                             criterios={"f51_nominal": 1.5})
+    assert r["funcoes"]["51"]["pickup"] == pytest.approx(150.0)
+    assert any("NOMINAL" in p for p in r["premissas"])
 
 
 def test_reator_de_linha_sai_com_a_linha():
@@ -666,21 +677,17 @@ def test_reator_de_barra_pode_ser_desligado():
     assert com.fault(2, "1FT") > sem.fault(2, "1FT")      # reator aterrado eleva a 1FT
 
 
-def test_estudo_barra_corrente_de_terminal_aberto_confere_com_line_end_open(radial):
-    """A corrente com terminal remoto aberto do estudo de barra é a do line_end_open."""
-    from lincc.protecao import _i_aberto
-    M = AnaModel(str(CASES / "caso1_radial.ANA"))
-    SL = Solver(M, drop_branches=[(1, 2, "1")], manter_reatores=[(1, 2, "1")],
-                modo="sincronas"); SL.factor(avisar=False)
-    br = SL._find_branch(1, 2, "1")
-    z1 = complex(br["R1"], br["X1"]) / 100
-    z0 = complex(br["R0"], br["X0"]) / 100
-    Z1, _, Z0 = SL.zth(1)
-    Ib = SB / (math.sqrt(3) * M.bus_kv[1])
-    for k in ("3F", "1FT", "2F", "2FT"):
-        assert _i_aberto(Z1, Z0, z1, z0, 1.0, k, Ib) == pytest.approx(
-            radial.line_end_open(1, 2, "1", 1, k, p=1.0, modo="sincronas") * 1000, rel=1e-9)
+def test_terminal_aberto_com_topologia_real(radial):
+    """Terminal aberto: linha pendurada no terminal fechado, falta em qualquer posição.
 
+    A posição muda o resultado e a varredura é contínua até a ponta aberta, calculada no
+    nó fictício que representa a extremidade aberta.
+    """
+    perto = radial.line_end_open(1, 2, "1", 1, "3F", p=1e-3)
+    ponta = radial.line_end_open(1, 2, "1", 1, "3F", p=1.0)
+    quase = radial.line_end_open(1, 2, "1", 1, "3F", p=0.999)
+    assert perto > ponta
+    assert quase == pytest.approx(ponta, rel=1e-3)
 
 def test_estudo_barra_aplica_os_criterios_e_declara_premissas():
     from lincc import estudo_barra
@@ -689,6 +696,14 @@ def test_estudo_barra_aplica_os_criterios_e_declara_premissas():
     f = r["funcoes"]
     icc = f["87B"]["icc_min"]
     assert f["87B"]["pickup"] <= icc
+    # sem critério informado: checkzone e alarme sem escala fixa — só faixas
+    assert f["checkzone"]["pickup"] is None and f["checkzone"]["max"] is not None
+    assert f["alarme"]["pickup"] is None
+    assert not r["exportacao"]["exportavel"]              # sem perfil de IED
+    # com o critério do usuário, aplicado e com o piso de medição
+    r = estudo_barra(M, 2, dados={"in_tc_ref": 1000.0},
+                     criterios={"f_checkzone": 0.8, "f_alarme": 0.15})
+    f = r["funcoes"]
     assert f["checkzone"]["pickup"] == pytest.approx(max(0.8 * f["87B"]["pickup"], 50.0))
     assert f["alarme"]["pickup"] >= 50.0                  # piso de 5% de In do TC
     assert not f["slope"]["calculado"]
@@ -701,11 +716,12 @@ def test_51v_transformador_quando_a_falta_remota_fica_abaixo_do_51():
     M = AnaModel(str(CASES / "caso1_radial.ANA"))
     t = next(b for b in M.branches if b["tipo"] == "T")
     elem = (t["bf"], t["bt"], t["nc"])
+    crit = {"f51_nominal": 1.5}
     folgado = ajuste_sobrecorrente(M, "transformador", elem, dados={"in_nominal": 1.0},
-                                   modo="sincronas")
+                                   modo="sincronas", criterios=crit)
     assert not folgado["funcoes"]["51V"]["necessaria"]
     apertado = ajuste_sobrecorrente(M, "transformador", elem, dados={"in_nominal": 1e5},
-                                    modo="sincronas")
+                                    modo="sincronas", criterios=crit)
     v = apertado["funcoes"]["51V"]
     assert v["necessaria"] and v["v_partida"] == pytest.approx(0.80)
     assert v["k"] == pytest.approx(v["i_falta_remota_min"] / (1.2 * v["pickup_51"]))
@@ -731,3 +747,96 @@ def test_estudo_barra_slope_e_parametro_do_ied():
     assert not s["calculado"] and "REB670" in " ".join(s["por_fabricante"])
     assert r["funcoes"]["87B"]["pickup"] <= 0.8 * r["funcoes"]["87B"]["icc_min"] + 1e-9 \
         or r["funcoes"]["87B"]["alertas"]
+
+
+# ---------- auditoria: correções P0 ----------
+
+def test_e05_falta_intermediaria_executa_nos_dois_modos():
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    for modo in ("sincronas", "completo"):
+        S = Solver(M, modo=modo); S.factor(avisar=False)
+        r = S.fault_on_branch(1, 2, "1", 0.5, "1FT", Zf=0.01)
+        assert r and r["If"] > 0 and r["I_term_1"] > 0 and r["3I0_term_1"] is not None
+
+
+def test_e02_derivado_herda_o_cenario():
+    """Topologia derivada não reintroduz o que o cenário de origem retirou."""
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    S = Solver(M, modo="sincronas", drop_reatores_barra=[2]); S.factor(avisar=False)
+    S2 = S._derivado()
+    assert S2.dropH == S.dropB | S.dropH or 2 in S2.dropH
+    assert S2.modo == S.modo and S2.charging == S.charging
+
+
+def test_e03_kirchhoff_em_sequencia_zero_com_mutua():
+    """Correntes de sequência zero recuperadas numa barra com linhas acopladas somam a
+    corrente de falta."""
+    from lincc.protecao import _ramos_incidentes
+    from lincc._base import zn3
+    M = AnaModel(str(CASES / "caso2_mutuas.ANA"))
+    S = Solver(M, modo="sincronas"); S.factor(avisar=False)
+    for b in [x for x in M.bus_kv if M.bus_kv[x]]:
+        prof = S._perfil(b, "1FT")
+        if prof is None or prof["V0"] is None:
+            continue
+        V0 = prof["V0"]; soma = 0j
+        for r in _ramos_incidentes(M, b):
+            br = S._find_branch(*r)
+            soma += (S._i0_linha(V0, br, b) if br["tipo"] == "L"
+                     else -S.corrente_seq0_ramo(V0, br, b))
+        v = V0[S.I0P[b]]
+        for h in M.shunts:
+            if h["bus"] == b and h.get("X0"):
+                soma += v * (h.get("nunop", 1) or 1) / (((h.get("R0") or 0) + 1j * h["X0"]) / 100)
+        for g in M.gens:
+            if g["bus"] == b and g.get("X0") and g.get("conn", "YN") == "YN":
+                zn = zn3(g.get("rn"), g.get("xn")) or 0
+                soma += v * (g.get("nunop", 1) or 1) / (((g.get("R0") or 0) + 1j * g["X0"]) / 100 + zn)
+        if not any(s for s in M.shl) and abs(prof["Ia0"]) > 1e-9:
+            assert abs(soma + prof["Ia0"]) / abs(prof["Ia0"]) < 1e-6, b
+
+
+def test_e07_capacitor_serie_aberto_e_bypass_sao_distintos():
+    # banco em SÉRIE com a linha: linha 1-9 e capacitor 9-2
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    lin = next(b for b in M.branches if {b["bf"], b["bt"]} == {1, 2})
+    M.branches = [b for b in M.branches if b is not lin] + [dict(lin, bf=1, bt=9)]
+    M.bus_kv[9] = M.bus_kv[2]; M.bus_name[9] = "MEIO"
+    M.caps.append(dict(bf=9, bt=2, nc="C", tipo="S", X1=-3.0, X0=-3.0))
+    base = Solver(M, modo="sincronas"); base.factor(avisar=False)
+    byp = Solver(M, modo="sincronas", bypass_capacitores=[(9, 2, "C")]); byp.factor(avisar=False)
+    abe = Solver(M, modo="sincronas", drop_branches=[(9, 2, "C")]); abe.factor(avisar=False)
+    i_base, i_byp = base.fault(2, "3F"), byp.fault(2, "3F")
+    assert i_base > i_byp                          # compensação série eleva a corrente
+    i_abe = abe.fault(2, "3F")                     # banco aberto: a linha deixa de alimentar 2
+    assert i_abe < i_byp
+    assert base.branch_current(2, 9, 2, "C", "3F") is not None      # banco consultável
+
+
+def test_e09_convencoes_de_defeito_e_zf_coerentes(radial):
+    """Corrente de fase de `fault` = composição física das sequências, com a mesma Zf."""
+    import numpy as np
+    for k in ("1FT", "2F", "2FT"):
+        for zf in (0.0, 0.05):
+            p = radial._perfil(2, k, zf)
+            a = np.exp(2j * np.pi / 3)
+            fases = [p["Ia0"] + p["Ia1"] + p["Ia2"],
+                     p["Ia0"] + a * a * p["Ia1"] + a * p["Ia2"],
+                     p["Ia0"] + a * p["Ia1"] + a * a * p["Ia2"]]
+            Ib = SB / (math.sqrt(3) * radial.M.bus_kv[2])
+            fisica = max(abs(x) for x in fases) * Ib
+            assert radial.fault(2, k, Zf=zf) == pytest.approx(fisica, rel=1e-9), (k, zf)
+
+
+def test_resultados_trazem_estado_e_limitacao_de_sequencia_negativa():
+    from lincc import ajuste_sobrecorrente, estudo_barra
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    r = ajuste_sobrecorrente(M, "linha", (1, 2, "1"))
+    assert all(f["estado"] in ("calculavel_verificada", "faixa_inviavel", "dados_faltantes",
+                                "modelo_nao_suportado", "validacao_pendente", "erro_execucao")
+               for f in r["funcoes"].values())
+    assert r["funcoes"]["51"]["estado"] == "dados_faltantes"       # sem carga informada
+    assert any("sequência negativa" in p for p in r["premissas"])
+    e = estudo_barra(M, 2)
+    assert e["funcoes"]["slope"]["estado"] == "modelo_nao_suportado"
+    assert "falhas" in e

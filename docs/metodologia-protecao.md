@@ -25,7 +25,7 @@ partir do ANAREDE é informativo e não entra em nenhum ajuste.
 
 | Função | Critério |
 |---|---|
-| 51 | pickup em 150% da corrente nominal |
+| 51 | sem padrão universal: o múltiplo da nominal é critério da filosofia do agente e do perfil de carga do transformador, informado no pedido; sem ele o resultado sai como dados faltantes |
 | 50 | acima de 120% do maior entre passa-através (falta na barra do outro lado) e inrush; abaixo da falta na barra local |
 
 ## 51V — sobrecorrente com dependência de tensão
@@ -75,8 +75,8 @@ fabricantes. O LINCC não calcula slope e informa a referência de cada fabrican
 | 87B | capacidade de emergência < pickup < curto mínimo; sugerido 67% do curto mínimo; sem faixa, prevalece o curto | critério do usuário, compatível com [7] |
 | 87B, teto | pickup ≤ 80% do curto mínimo | [7] |
 | 87B, faixa típica | 50% a 150% de In do maior TC, verificada quando o TC é informado | [7] |
-| Checkzone | 80% do pickup do 87B | critério do usuário |
-| Alarme | 15% do pickup do 87B, abaixo da menor capacidade nominal dos vãos — detecta TC aberto sem disparo | critério do usuário |
+| Checkzone | faixa própria: acima do piso de medição e abaixo do teto de sensibilidade para toda falta interna; sem escala fixa em relação ao 87B | critério de sensibilidade |
+| Alarme de TC aberto | abaixo da menor corrente REAL conduzida pelos vãos nos cenários do ANAREDE — é ela que aparece como diferencial quando um TC abre; limite inferior e temporização dependem dos TCs | critério de detecção |
 | 50BF | capacidade nominal < pickup < falta na extremidade oposta com remoto aberto, na alimentação local mais fraca; prevalece a sensibilidade | critério do usuário, alinhado a [8] |
 | 50BF, disparos sem corrente de falta | lógica por contato do disjuntor | [9][10] |
 | EFP | abaixo da falta junto ao disjuntor aberto, nas duas posições de TC; sem piso de carga | critério do usuário |
@@ -92,6 +92,25 @@ prevê a detecção por corrente ou pelo sinal de disparo remanescente, e o redi
 
 GE MiCOM P74x (barra) e os tempos de redisparo e de falha de disjuntor. Os tempos seguem o
 limite de 250 ms do Submódulo 2.11 até a revisão específica.
+
+## Critérios do usuário e exportação
+
+Os critérios de filosofia do agente — múltiplos de carga, escalas entre funções, margens —
+não são padrão do código: são informados no pedido e entram pelo parâmetro `criterios` de
+cada função. Sem eles, a função devolve a faixa admissível e marca o critério como faltante.
+
+Curvas de tempo inverso seguem a forma padronizada, sem fator de normalização de
+fabricante. O ajuste de um IED específico usa a curva documentada no manual dele,
+registrada com fonte, seção e revisão.
+
+Um resultado só pode ser exportado como ajuste de relé com o perfil do IED documentado —
+cada regra com fonte, seção, revisão, base, unidade, resolução e classe de evidência — e
+com todas as funções em `calculavel_verificada`. Exemplo de manual não vira requisito.
+Fora disso, o resultado é insumo de estudo.
+
+SIR é indicador de desempenho da proteção de distância, não critério de proibição: a
+viabilidade depende da característica, da polarização e do desempenho transitório do IED e
+do TP capacitivo, comprovados à parte.
 
 ## Referências
 

@@ -315,10 +315,12 @@ def curto_por_cenario(ana, cenarios, barras, kinds=('3F', '1FT'), modo='completo
             for k in kinds:
                 try:
                     res[(b, k)] = S.fault(b, k) * 1000.0
-                except Exception:
+                except Exception as ex:
                     res[(b, k)] = None
+                    falhas.append((b, k, type(ex).__name__))
         return res
 
+    falhas = []
     saida = {'despacho': {}, 'por_cenario_max': {}, 'por_cenario_min': {}, 'modo': modo,
              'metodo': ('fontes paradas no cenário do ANAREDE retiradas do caso de '
                         'curto-circuito; impedâncias e topologia inalteradas; geradores '
@@ -349,6 +351,11 @@ def curto_por_cenario(ana, cenarios, barras, kinds=('3F', '1FT'), modo='completo
                 extremos[(b, k)] = {'max': vmax, 'min': vmin,
                                     'incerteza_mapeamento_pct': max(faixa) if faixa else None}
     saida['extremos'] = extremos
+    # falha não some: entra no denominador, e um extremo calculado sem todos os cenários
+    # não é declarado completo
+    saida['falhas'] = falhas
+    saida['cenarios_avaliados'] = len(cenarios) * 2
+    saida['completo'] = not falhas
     saida['premissas'] = [
         'tensão pré-falta de 1,0 pu, sem carregamento prévio',
         f'modo {modo}',

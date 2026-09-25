@@ -9,13 +9,14 @@ material: para I/Is = 5 na curva muito inversa, a IEC dá 3,375·TMS e a IEEE 0,
 ordem de grandeza do multiplicador é outra, e comparar TMS com TD sem converter é erro
 comum. Por isso a norma é sempre explícita no retorno, nunca implícita.
 
-A IEEE C37.112 traz o fator 1/7 na definição:
+As duas famílias usam aqui a forma padronizada, sem fator adicional:
 
-    IEC   t = TMS · [ A / ((I/Is)^B − 1) + C ]
-    IEEE  t = (TD/7) · [ A / ((I/Is)^B − 1) + C ]
+    t = TMS · [ A / ((I/Is)^B − 1) + C ]
 
-Parte dos fabricantes implementa a forma IEEE sem o 1/7, o que multiplica o tempo por
-sete. Ao comparar com ajuste de IED, confira qual forma o relé usa.
+Cada fabricante normaliza o multiplicador de tempo à sua maneira: há relés que dividem o
+multiplicador por uma constante, e famílias com constantes próprias. Nenhuma dessas
+normalizações é universal. O ajuste de um IED específico usa a curva documentada no manual
+dele, registrada com `curva_do_ied()`, e não estas curvas genéricas.
 
     from lincc.curvas import tempo, CURVAS
     tempo(I=1200, Is=400, tms=0.2)                       # IEC muito inversa
@@ -69,7 +70,7 @@ def tempo(I, Is, tms=1.0, curva=CURVA_PADRAO, norma=NORMA_PADRAO):
     array de correntes.
     """
     A, B, C = constantes(curva, norma)
-    k = 1.0 / 7.0 if (norma or NORMA_PADRAO).upper() == 'IEEE' else 1.0
+    k = _FATOR_IED.get((norma or NORMA_PADRAO).upper(), 1.0)
     m = np.asarray(I, dtype=float) / float(Is)
     with np.errstate(divide='ignore', invalid='ignore'):
         t = k * tms * (A / (m ** B - 1.0) + C)
@@ -86,7 +87,7 @@ def tms_para_tempo(I, Is, t_alvo, curva=CURVA_PADRAO, norma=NORMA_PADRAO):
     m = float(I) / float(Is)
     if m <= 1.0:
         raise ValueError(f"I/Is = {m:.3f} não supera o pickup: a unidade não operaria")
-    k = 1.0 / 7.0 if (norma or NORMA_PADRAO).upper() == 'IEEE' else 1.0
+    k = _FATOR_IED.get((norma or NORMA_PADRAO).upper(), 1.0)
     base = k * (A / (m ** B - 1.0) + C)
     if base <= 0:
         raise ValueError("curva degenerada para esta relação I/Is")
@@ -98,3 +99,23 @@ def descreve(curva=CURVA_PADRAO, norma=NORMA_PADRAO):
     A, B, C = constantes(curva, norma)
     n = (norma or NORMA_PADRAO).upper(); c = (curva or CURVA_PADRAO).upper()
     return f"{n} {_NOMES.get(c, c)} (A={A}, B={B}, C={C})"
+
+
+_FATOR_IED = {}
+_FONTE_IED = {}
+
+
+def curva_do_ied(fabricante, modelo, nome, A, B, C, fonte, secao, revisao, fator_td=1.0):
+    """Registra a curva documentada de um IED: t = fator_td · TD · [A/((I/Is)^B − 1) + C].
+
+    Exige fonte, seção e revisão do manual: curva sem documento não é usada para ajuste.
+    Devolve (curva, norma) a passar em `tempo`, com norma = 'IED:<FABRICANTE>:<MODELO>'.
+    """
+    for campo, v in (('fonte', fonte), ('secao', secao), ('revisao', revisao)):
+        if not v:
+            raise ValueError(f"curva de IED sem {campo}: registro recusado")
+    norma = f"IED:{fabricante}:{modelo}".upper()
+    CURVAS.setdefault(norma, {})[nome.upper()] = (A, B, C)
+    _FATOR_IED[norma] = float(fator_td)
+    _FONTE_IED[(norma, nome.upper())] = dict(fonte=fonte, secao=secao, revisao=revisao)
+    return nome.upper(), norma

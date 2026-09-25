@@ -153,7 +153,9 @@ class AnaModel:
                 _cn,rn,xn = self._lado_equip(ln, bff, btt)
                 self.zig.append(dict(bus=btt if btt else bff, X0=X0, R0=R0, rn=rn, xn=xn))
             elif tipo == 'S':
-                self.caps.append(dict(bf=bff, bt=btt, X1=X1, X0=X0))
+                # identidade do banco: circuito na mesma coluna dos demais ramos
+                self.caps.append(dict(bf=bff, bt=btt, nc=ln[14:16].strip() or '1',
+                                      tipo='S', X1=X1, X0=X0))
             elif tipo == 'L':
                 cd,cp = self._conns(ln)
                 self.branches.append(dict(tipo='L', bf=bff, bt=btt, nc=ln[14:16].strip(),
