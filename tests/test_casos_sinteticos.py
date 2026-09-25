@@ -875,3 +875,32 @@ def test_conversao_ao_secundario():
     assert para_secundario(10.0, "impedancia", rtc=3000, rtp=500e3 / 115) == \
         pytest.approx(10.0 * 3000 / (500e3 / 115))
     assert para_secundario(10.0, "impedancia", rtc=3000) is None     # sem TP, não exporta
+
+
+def test_87l_faixa_entre_capacitiva_e_falta_interna():
+    from lincc import estudo_87L
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    r = estudo_87L(M, (1, 2, "1"), dados={"in_tc_ref": 1000.0}, modo="sincronas")
+    f = r["funcoes"]["87L"]
+    assert f["i_interna_min"] > 0 and f["min"] >= 50.0 and f["max"] == f["i_interna_min"]
+    assert f["estado"] in ("calculavel_verificada", "faixa_inviavel")
+    assert r["premissas"] and "relacao_sensibilidade" in r["faltantes"]
+
+
+def test_quantizar_respeita_a_faixa():
+    from lincc import quantizar
+    assert quantizar(1108.7, (1000, 1200), 50, "baixo") == 1100
+    assert quantizar(1008.0, (1005, 1200), 50, "baixo") == 1050     # tenta o outro sentido
+    assert quantizar(1010.0, (1005, 1040), 50, "baixo") is None     # faixa não comporta o passo
+
+
+def test_51v_controle_e_restricao_separados():
+    from lincc import ajuste_sobrecorrente
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    t = next(b for b in M.branches if b["tipo"] == "T")
+    r = ajuste_sobrecorrente(M, "transformador", (t["bf"], t["bt"], t["nc"]),
+                             dados={"in_nominal": 1e5}, modo="sincronas",
+                             criterios={"f51_nominal": 1.5})
+    v = r["funcoes"]["51V"]
+    assert "controle" in v and "restricao" in v
+    assert v["restricao"]["forma"] == "linear genérica"

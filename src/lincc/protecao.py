@@ -245,11 +245,12 @@ def _premissas_curto(S):
 
 
 def _solver(model, drop=None, modo='completo', manter_reatores=None,
-            drop_reatores_barra=None):
+            drop_reatores_barra=None, bypass_capacitores=None):
     # avisar=False: numa chamada de alto nível o aviso apareceria uma vez por cenário
     # interno — o relatório declara o modo no retorno, que é onde interessa.
     S = Solver(model, drop_branches=list(drop) if drop else None, modo=modo,
-               manter_reatores=manter_reatores, drop_reatores_barra=drop_reatores_barra)
+               manter_reatores=manter_reatores, drop_reatores_barra=drop_reatores_barra,
+               bypass_capacitores=bypass_capacitores)
     S.factor(avisar=False)
     conf = getattr(model, '_leitura_conferida', None)
     if modo == 'completo' and conf:
@@ -569,6 +570,21 @@ def _avaliar_51v(S, bus_rele, pickup51, faltas, crit51v, prem):
             f'partida ({crit51v["v_partida"]:.2f} pu): a 51V não se sensibiliza')
     if k < 0.1:
         out['alertas'].append(f'fator k = {k:.2f} abaixo da faixa usual dos relés')
+    # Os dois princípios são objetos distintos (L09): no CONTROLE, a tensão habilita um
+    # pickup reduzido fixo; na RESTRIÇÃO, o pickup varia continuamente com a tensão. Aqui a
+    # restrição usa a forma linear genérica pickup(V) = I>·max(k, V/Vs); a curva real de
+    # cada IED vem do perfil do fabricante.
+    vs = crit51v['v_partida']
+    out['controle'] = dict(
+        habilita=(vrele is not None and vrele < vs), pickup=k * pickup51,
+        margem=(imin / (k * pickup51)) if (vrele is not None and vrele < vs) else None)
+    if vrele is not None:
+        pk_r = pickup51 * max(k, min(1.0, vrele / vs))
+        out['restricao'] = dict(pickup_na_tensao=pk_r, margem=imin / pk_r,
+                                opera=imin > pk_r, forma='linear genérica')
+        if imin <= pk_r:
+            out['alertas'].append(f'na restrição, o pickup na tensão da falta ({pk_r:.0f} A) '
+                                  f'fica acima da falta remota mínima ({imin:.0f} A)')
     prem.append(f"51V: necessária quando a falta remota mínima fica abaixo do pickup do 51; "
                 f"partida em {crit51v['v_partida']:.2f} pu da tensão fase-fase; pickup "
                 f"reduzido por k com k·I> ≤ falta remota mínima / {crit51v['margem_k']:.1f}; "
@@ -626,6 +642,26 @@ def _estado(f, conferido=True):
             f.get('min') is None or f.get('max') is None):
         return 'dados_faltantes'
     return 'calculavel_verificada' if conferido else 'validacao_pendente'
+
+
+def quantizar(valor, faixa, passo, sentido='baixo'):
+    """Arredonda um ajuste ao passo do relé sem sair da faixa admissível.
+
+    `sentido`='baixo' arredonda para baixo (ajustes limitados por sensibilidade), 'cima'
+    para cima (limitados por segurança). Se o valor arredondado sair da faixa, tenta o
+    outro sentido; se nenhum couber, devolve None — a faixa não comporta o passo do relé.
+    """
+    import math
+    if valor is None or not passo:
+        return valor
+    lo, hi = faixa if faixa else (None, None)
+    f = math.floor if sentido == 'baixo' else math.ceil
+    g = math.ceil if sentido == 'baixo' else math.floor
+    for fn in (f, g):
+        q = fn(valor / passo) * passo
+        if (lo is None or q >= lo - 1e-9) and (hi is None or q <= hi + 1e-9):
+            return q
+    return None
 
 
 def _faixa(minimo, maximo):
@@ -1016,6 +1052,13 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
                                      f'recomposição por {nome(ram)} no cenário {nome_cen}, {k}'))
         prem += [p for p in cc['premissas'] if p not in prem]
     icc_min, cond_min = min(cand)
+    categorias = {}
+    for v, c in cand:
+        cat = ('recomposição' if c.startswith('recomposição') else
+               'cenário' if c.startswith('cenário') else
+               'contingência' if c.startswith('N-1') else 'rede completa')
+        if cat not in categorias or v < categorias[cat][0]:
+            categorias[cat] = (v, c)
 
     # --- cargas por vão ---
     cargas = {}
@@ -1105,7 +1148,15 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
                              f"maior TC ({lo*float(in_ref):.0f} a {hi*float(in_ref):.0f} A)")
     if pk >= icc_min:
         alertas87.append('pickup não fica abaixo do curto mínimo: sensibilidade não garantida')
+    passo = crit.get('passo_ajuste')
+    if passo:
+        q = quantizar(pk, (carga_max, crit['f_icc_max'] * icc_min), passo, 'baixo')
+        if q is None:
+            alertas87.append(f'faixa não comporta o passo de ajuste de {passo} A')
+        else:
+            pk = q
     funcoes['87B'] = dict(pickup=pk, faixa=(carga_max, icc_min), icc_min=icc_min,
+                          minimos_por_categoria=categorias,
                           condicao_icc_min=cond_min, relacao=icc_min / pk,
                           carga_emergencia_max=carga_max, alertas=alertas87)
     # checkzone: critério próprio — operar para toda falta interna da barra, com a mesma
@@ -1277,3 +1328,109 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
                 funcoes_sm211=funcoes_exigidas('barra'))
     res['exportacao'] = politica_exportacao(res, perfil_ied)
     return res
+
+
+# ====================================================================== #
+#  Diferencial de linha (87L)                                            #
+# ====================================================================== #
+
+def estudo_87L(model, linha, dados=None, criterios=None, modo='completo',
+               kinds=_KINDS, posicoes=(0.001, 0.5, 0.999), n1=True, perfil_ied=None):
+    """Diferencial de linha de dois terminais: faixa de pickup e referências de estabilidade.
+
+    Limite inferior: corrente capacitiva da linha na tensão máxima de operação — aparece
+    como diferencial em regime. Limite superior: a menor corrente diferencial para falta
+    INTERNA, varrida ao longo da linha (`posicoes`) em rede completa e N-1 em torno dos
+    dois terminais; a diferencial de uma falta interna é a própria corrente de falta, com
+    os dois terminais alimentando ou com um deles fraco. Referência de estabilidade: a
+    maior corrente passante para falta externa nas duas barras.
+
+    `criterios`: 'v_max' (pu, padrão 1,05), 'margem_capacitiva' e 'relacao_sensibilidade'
+    (sem padrão — critério do usuário); `dados`: 'in_tc_ref' para o piso de medição.
+    A característica percentual, a compensação de corrente capacitiva e o canal de
+    comunicação do IED não estão modelados.
+    """
+    crit = dict(criterios or {})
+    dados = dict(dados or {})
+    bf, bt, nc = int(linha[0]), int(linha[1]), str(linha[2])
+    S0 = _solver(model, None, modo)
+    br = S0._find_branch(bf, bt, nc)
+    if br is None or br['tipo'] != 'L':
+        raise ValueError(f'linha {bf}-{bt}/{nc} não encontrada')
+    kv = model.bus_kv.get(bf)
+    Ib = SB / (np.sqrt(3) * kv) * 1000.0                  # A
+    vmax = crit.get('v_max', 1.05)
+    b_pu = (br.get('S1') or 0.0) / 100.0                  # susceptância total, pu
+    i_cap = b_pu * vmax * Ib if b_pu else None
+    prem = _premissas_curto(S0)
+
+    cen = [('rede completa', [])]
+    if n1:
+        vistos = set()
+        for b in (bf, bt):
+            for r in _ramos_incidentes(model, b):
+                eq = tuple(sorted(_equipamento(model, r, b)))
+                if (bf, bt, nc) in eq or (bt, bf, nc) in eq or eq in vistos:
+                    continue
+                vistos.add(eq)
+                cen.append((f'N-1 sem {r[0]}-{r[1]}/{r[2]}', list(eq)))
+    internas, externas, falhas = [], [], []
+    for rot, drop in cen:
+        try:
+            S = S0 if not drop else _solver(model, drop, modo)
+        except Exception as ex:
+            falhas.append(f'{rot}: {type(ex).__name__}')
+            continue
+        for k in kinds:
+            for p in posicoes:
+                try:
+                    r = S.fault_on_branch(bf, bt, nc, p, k)
+                except Exception as ex:
+                    falhas.append(f'{rot}, p={p}, {k}: {type(ex).__name__}')
+                    continue
+                if r and r.get('If'):
+                    internas.append((r['If'] * 1000.0, f'{rot}, falta interna a {p:.0%}, {k}'))
+            for fb in (bf, bt):
+                try:
+                    r = S.branch_current(fb, bf, bt, nc, k)
+                except Exception as ex:
+                    falhas.append(f'{rot}, externa em {fb}, {k}: {type(ex).__name__}')
+                    continue
+                if r:
+                    externas.append((r['Imax'] * 1000.0, f'{rot}, falta externa em {fb}, {k}'))
+    i_int_min = min(internas) if internas else (None, None)
+    i_ext_max = max(externas) if externas else (None, None)
+    alertas = []
+    piso = i_cap * crit['margem_capacitiva'] if (i_cap and crit.get('margem_capacitiva')) else i_cap
+    if dados.get('in_tc_ref'):
+        piso_tc = 0.05 * float(dados['in_tc_ref'])
+        if piso is None or piso_tc > piso:
+            piso = piso_tc
+    teto = (i_int_min[0] / crit['relacao_sensibilidade']
+            if (i_int_min[0] and crit.get('relacao_sensibilidade')) else i_int_min[0])
+    viavel = (piso is None or teto is None) or piso < teto
+    if not viavel:
+        alertas.append('corrente capacitiva acima da menor falta interna: exige compensação '
+                       'de corrente capacitiva no IED')
+    if not crit.get('relacao_sensibilidade'):
+        alertas.append('relação de sensibilidade não informada: teto na própria falta mínima')
+    prem += [
+        f'corrente capacitiva da linha a {vmax:.2f} pu, pela susceptância total do cadastro',
+        'falta interna varrida em ' + ', '.join(f'{p:.0%}' for p in posicoes) +
+        ' da linha, rede completa e N-1 em torno dos dois terminais; diferencial = corrente '
+        'de falta',
+        'estabilidade referida à maior corrente passante para falta externa nas duas barras',
+        'característica percentual, compensação capacitiva e canal do IED não modelados',
+    ]
+    f = dict(min=piso, max=teto, viavel=viavel, pickup=None,
+             i_capacitiva=i_cap, i_interna_min=i_int_min[0], condicao_interna=i_int_min[1],
+             i_passante_max=i_ext_max[0], condicao_passante=i_ext_max[1], alertas=alertas)
+    conferido = bool(getattr(model, '_leitura_conferida', None)) or not S0._tem_fc() \
+        or modo != 'completo'
+    f['estado'] = _estado(f, conferido)
+    out = dict(linha=(bf, bt, nc), modo=modo, funcoes={'87L': f}, premissas=prem,
+               falhas=falhas,
+               faltantes=[x for x, ok in (('relacao_sensibilidade', crit.get('relacao_sensibilidade')),
+                                         ('in_tc_ref', dados.get('in_tc_ref'))) if not ok])
+    out['exportacao'] = politica_exportacao(out, perfil_ied)
+    return out

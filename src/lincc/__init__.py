@@ -114,6 +114,10 @@ FUNÇÕES DE ALTO NÍVEL — resolvem o estudo inteiro numa chamada
                                               Leva alguns minutos numa base do SIN — avise
                                               o usuário antes de rodar
 
+    estudo_87L(M, (bf, bt, nc))              diferencial de linha: faixa do pickup entre a
+                                              corrente capacitiva e a menor falta interna,
+                                              e a maior passante externa como referência
+
     estudo_distancia(M, (bf, bt, nc))        proteção de distância: impedância aparente por
                                               laço em rede completa e N-1, limites de alcance
                                               das zonas, k0 (e Kr/Kx), SIR como indicador,
@@ -197,7 +201,7 @@ from .protecao import (recomposicao_87b,               # motor de proteção
                        impacto_entrada, relatorio_curto, relatorio_protecao,
                        ajuste_sobrecorrente, CRITERIOS_SOBRECORRENTE,
                        estudo_barra, CRITERIOS_BARRA,
-                       SLOPE_87B_POR_FABRICANTE)
+                       SLOPE_87B_POR_FABRICANTE, estudo_87L, quantizar)
 from .distancia import estudo_distancia, para_secundario   # motor de proteção: 21/21N
 
 __version__ = "0.3.0"
@@ -211,7 +215,7 @@ __all__ = [
     "recomposicao_87b", "envelope_contribuicoes", "tabela_envelope",
     "impacto_entrada", "relatorio_curto", "relatorio_protecao",
     "ajuste_sobrecorrente", "CRITERIOS_SOBRECORRENTE", "estudo_barra", "CRITERIOS_BARRA", "SLOPE_87B_POR_FABRICANTE",
-    "estudo_distancia", "para_secundario",
+    "estudo_distancia", "para_secundario", "estudo_87L", "quantizar",
     # motor de fluxo de potência
     "fluxo",
     # apoio

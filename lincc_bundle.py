@@ -114,6 +114,10 @@ FUNÇÕES DE ALTO NÍVEL — resolvem o estudo inteiro numa chamada
                                               Leva alguns minutos numa base do SIN — avise
                                               o usuário antes de rodar
 
+    estudo_87L(M, (bf, bt, nc))              diferencial de linha: faixa do pickup entre a
+                                              corrente capacitiva e a menor falta interna,
+                                              e a maior passante externa como referência
+
     estudo_distancia(M, (bf, bt, nc))        proteção de distância: impedância aparente por
                                               laço em rede completa e N-1, limites de alcance
                                               das zonas, k0 (e Kr/Kx), SIR como indicador,
@@ -2780,11 +2784,12 @@ def _premissas_curto(S):
 
 
 def _solver(model, drop=None, modo='completo', manter_reatores=None,
-            drop_reatores_barra=None):
+            drop_reatores_barra=None, bypass_capacitores=None):
     # avisar=False: numa chamada de alto nível o aviso apareceria uma vez por cenário
     # interno — o relatório declara o modo no retorno, que é onde interessa.
     S = Solver(model, drop_branches=list(drop) if drop else None, modo=modo,
-               manter_reatores=manter_reatores, drop_reatores_barra=drop_reatores_barra)
+               manter_reatores=manter_reatores, drop_reatores_barra=drop_reatores_barra,
+               bypass_capacitores=bypass_capacitores)
     S.factor(avisar=False)
     conf = getattr(model, '_leitura_conferida', None)
     if modo == 'completo' and conf:
@@ -3104,6 +3109,21 @@ def _avaliar_51v(S, bus_rele, pickup51, faltas, crit51v, prem):
             f'partida ({crit51v["v_partida"]:.2f} pu): a 51V não se sensibiliza')
     if k < 0.1:
         out['alertas'].append(f'fator k = {k:.2f} abaixo da faixa usual dos relés')
+    # Os dois princípios são objetos distintos (L09): no CONTROLE, a tensão habilita um
+    # pickup reduzido fixo; na RESTRIÇÃO, o pickup varia continuamente com a tensão. Aqui a
+    # restrição usa a forma linear genérica pickup(V) = I>·max(k, V/Vs); a curva real de
+    # cada IED vem do perfil do fabricante.
+    vs = crit51v['v_partida']
+    out['controle'] = dict(
+        habilita=(vrele is not None and vrele < vs), pickup=k * pickup51,
+        margem=(imin / (k * pickup51)) if (vrele is not None and vrele < vs) else None)
+    if vrele is not None:
+        pk_r = pickup51 * max(k, min(1.0, vrele / vs))
+        out['restricao'] = dict(pickup_na_tensao=pk_r, margem=imin / pk_r,
+                                opera=imin > pk_r, forma='linear genérica')
+        if imin <= pk_r:
+            out['alertas'].append(f'na restrição, o pickup na tensão da falta ({pk_r:.0f} A) '
+                                  f'fica acima da falta remota mínima ({imin:.0f} A)')
     prem.append(f"51V: necessária quando a falta remota mínima fica abaixo do pickup do 51; "
                 f"partida em {crit51v['v_partida']:.2f} pu da tensão fase-fase; pickup "
                 f"reduzido por k com k·I> ≤ falta remota mínima / {crit51v['margem_k']:.1f}; "
@@ -3161,6 +3181,26 @@ def _estado(f, conferido=True):
             f.get('min') is None or f.get('max') is None):
         return 'dados_faltantes'
     return 'calculavel_verificada' if conferido else 'validacao_pendente'
+
+
+def quantizar(valor, faixa, passo, sentido='baixo'):
+    """Arredonda um ajuste ao passo do relé sem sair da faixa admissível.
+
+    `sentido`='baixo' arredonda para baixo (ajustes limitados por sensibilidade), 'cima'
+    para cima (limitados por segurança). Se o valor arredondado sair da faixa, tenta o
+    outro sentido; se nenhum couber, devolve None — a faixa não comporta o passo do relé.
+    """
+    import math
+    if valor is None or not passo:
+        return valor
+    lo, hi = faixa if faixa else (None, None)
+    f = math.floor if sentido == 'baixo' else math.ceil
+    g = math.ceil if sentido == 'baixo' else math.floor
+    for fn in (f, g):
+        q = fn(valor / passo) * passo
+        if (lo is None or q >= lo - 1e-9) and (hi is None or q <= hi + 1e-9):
+            return q
+    return None
 
 
 def _faixa(minimo, maximo):
@@ -3551,6 +3591,13 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
                                      f'recomposição por {nome(ram)} no cenário {nome_cen}, {k}'))
         prem += [p for p in cc['premissas'] if p not in prem]
     icc_min, cond_min = min(cand)
+    categorias = {}
+    for v, c in cand:
+        cat = ('recomposição' if c.startswith('recomposição') else
+               'cenário' if c.startswith('cenário') else
+               'contingência' if c.startswith('N-1') else 'rede completa')
+        if cat not in categorias or v < categorias[cat][0]:
+            categorias[cat] = (v, c)
 
     # --- cargas por vão ---
     cargas = {}
@@ -3640,7 +3687,15 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
                              f"maior TC ({lo*float(in_ref):.0f} a {hi*float(in_ref):.0f} A)")
     if pk >= icc_min:
         alertas87.append('pickup não fica abaixo do curto mínimo: sensibilidade não garantida')
+    passo = crit.get('passo_ajuste')
+    if passo:
+        q = quantizar(pk, (carga_max, crit['f_icc_max'] * icc_min), passo, 'baixo')
+        if q is None:
+            alertas87.append(f'faixa não comporta o passo de ajuste de {passo} A')
+        else:
+            pk = q
     funcoes['87B'] = dict(pickup=pk, faixa=(carga_max, icc_min), icc_min=icc_min,
+                          minimos_por_categoria=categorias,
                           condicao_icc_min=cond_min, relacao=icc_min / pk,
                           carga_emergencia_max=carga_max, alertas=alertas87)
     # checkzone: critério próprio — operar para toda falta interna da barra, com a mesma
@@ -3814,6 +3869,112 @@ def estudo_barra(model, barra, dados=None, cenarios=None, criterios=None,
     return res
 
 
+# ====================================================================== #
+#  Diferencial de linha (87L)                                            #
+# ====================================================================== #
+
+def estudo_87L(model, linha, dados=None, criterios=None, modo='completo',
+               kinds=_KINDS, posicoes=(0.001, 0.5, 0.999), n1=True, perfil_ied=None):
+    """Diferencial de linha de dois terminais: faixa de pickup e referências de estabilidade.
+
+    Limite inferior: corrente capacitiva da linha na tensão máxima de operação — aparece
+    como diferencial em regime. Limite superior: a menor corrente diferencial para falta
+    INTERNA, varrida ao longo da linha (`posicoes`) em rede completa e N-1 em torno dos
+    dois terminais; a diferencial de uma falta interna é a própria corrente de falta, com
+    os dois terminais alimentando ou com um deles fraco. Referência de estabilidade: a
+    maior corrente passante para falta externa nas duas barras.
+
+    `criterios`: 'v_max' (pu, padrão 1,05), 'margem_capacitiva' e 'relacao_sensibilidade'
+    (sem padrão — critério do usuário); `dados`: 'in_tc_ref' para o piso de medição.
+    A característica percentual, a compensação de corrente capacitiva e o canal de
+    comunicação do IED não estão modelados.
+    """
+    crit = dict(criterios or {})
+    dados = dict(dados or {})
+    bf, bt, nc = int(linha[0]), int(linha[1]), str(linha[2])
+    S0 = _solver(model, None, modo)
+    br = S0._find_branch(bf, bt, nc)
+    if br is None or br['tipo'] != 'L':
+        raise ValueError(f'linha {bf}-{bt}/{nc} não encontrada')
+    kv = model.bus_kv.get(bf)
+    Ib = SB / (np.sqrt(3) * kv) * 1000.0                  # A
+    vmax = crit.get('v_max', 1.05)
+    b_pu = (br.get('S1') or 0.0) / 100.0                  # susceptância total, pu
+    i_cap = b_pu * vmax * Ib if b_pu else None
+    prem = _premissas_curto(S0)
+
+    cen = [('rede completa', [])]
+    if n1:
+        vistos = set()
+        for b in (bf, bt):
+            for r in _ramos_incidentes(model, b):
+                eq = tuple(sorted(_equipamento(model, r, b)))
+                if (bf, bt, nc) in eq or (bt, bf, nc) in eq or eq in vistos:
+                    continue
+                vistos.add(eq)
+                cen.append((f'N-1 sem {r[0]}-{r[1]}/{r[2]}', list(eq)))
+    internas, externas, falhas = [], [], []
+    for rot, drop in cen:
+        try:
+            S = S0 if not drop else _solver(model, drop, modo)
+        except Exception as ex:
+            falhas.append(f'{rot}: {type(ex).__name__}')
+            continue
+        for k in kinds:
+            for p in posicoes:
+                try:
+                    r = S.fault_on_branch(bf, bt, nc, p, k)
+                except Exception as ex:
+                    falhas.append(f'{rot}, p={p}, {k}: {type(ex).__name__}')
+                    continue
+                if r and r.get('If'):
+                    internas.append((r['If'] * 1000.0, f'{rot}, falta interna a {p:.0%}, {k}'))
+            for fb in (bf, bt):
+                try:
+                    r = S.branch_current(fb, bf, bt, nc, k)
+                except Exception as ex:
+                    falhas.append(f'{rot}, externa em {fb}, {k}: {type(ex).__name__}')
+                    continue
+                if r:
+                    externas.append((r['Imax'] * 1000.0, f'{rot}, falta externa em {fb}, {k}'))
+    i_int_min = min(internas) if internas else (None, None)
+    i_ext_max = max(externas) if externas else (None, None)
+    alertas = []
+    piso = i_cap * crit['margem_capacitiva'] if (i_cap and crit.get('margem_capacitiva')) else i_cap
+    if dados.get('in_tc_ref'):
+        piso_tc = 0.05 * float(dados['in_tc_ref'])
+        if piso is None or piso_tc > piso:
+            piso = piso_tc
+    teto = (i_int_min[0] / crit['relacao_sensibilidade']
+            if (i_int_min[0] and crit.get('relacao_sensibilidade')) else i_int_min[0])
+    viavel = (piso is None or teto is None) or piso < teto
+    if not viavel:
+        alertas.append('corrente capacitiva acima da menor falta interna: exige compensação '
+                       'de corrente capacitiva no IED')
+    if not crit.get('relacao_sensibilidade'):
+        alertas.append('relação de sensibilidade não informada: teto na própria falta mínima')
+    prem += [
+        f'corrente capacitiva da linha a {vmax:.2f} pu, pela susceptância total do cadastro',
+        'falta interna varrida em ' + ', '.join(f'{p:.0%}' for p in posicoes) +
+        ' da linha, rede completa e N-1 em torno dos dois terminais; diferencial = corrente '
+        'de falta',
+        'estabilidade referida à maior corrente passante para falta externa nas duas barras',
+        'característica percentual, compensação capacitiva e canal do IED não modelados',
+    ]
+    f = dict(min=piso, max=teto, viavel=viavel, pickup=None,
+             i_capacitiva=i_cap, i_interna_min=i_int_min[0], condicao_interna=i_int_min[1],
+             i_passante_max=i_ext_max[0], condicao_passante=i_ext_max[1], alertas=alertas)
+    conferido = bool(getattr(model, '_leitura_conferida', None)) or not S0._tem_fc() \
+        or modo != 'completo'
+    f['estado'] = _estado(f, conferido)
+    out = dict(linha=(bf, bt, nc), modo=modo, funcoes={'87L': f}, premissas=prem,
+               falhas=falhas,
+               faltantes=[x for x, ok in (('relacao_sensibilidade', crit.get('relacao_sensibilidade')),
+                                         ('in_tc_ref', dados.get('in_tc_ref'))) if not ok])
+    out['exportacao'] = politica_exportacao(out, perfil_ied)
+    return out
+
+
 # ===================== protecao de distancia =====================
 
 def para_secundario(valor, grandeza, rtc=None, rtp=None):
@@ -3892,7 +4053,7 @@ def estudo_distancia(model, linha, terminal=None, criterios=None, dados=None,
         return None if z is None else abs(z) * np.cos(np.angle(z) - ang_l)
 
     # --- cenários: rede completa e N-1 em torno dos dois terminais ---
-    cen = [('rede completa', [])]
+    cen = [('rede completa', [], [])]
     if n1:
         vistos = set()
         for b in (rele, remoto):
@@ -3901,7 +4062,7 @@ def estudo_distancia(model, linha, terminal=None, criterios=None, dados=None,
                 if (bf, bt, nc) in eq or (bt, bf, nc) in eq or eq in vistos:
                     continue
                 vistos.add(eq)
-                cen.append((f'N-1 sem {r[0]}-{r[1]}/{r[2]}', list(eq)))
+                cen.append((f'N-1 sem {r[0]}-{r[1]}/{r[2]}', list(eq), []))
 
     # --- pontos de falta: barra remota e extremidade das linhas adjacentes ---
     adj, paralelos = [], []
@@ -3915,19 +4076,35 @@ def estudo_distancia(model, linha, terminal=None, criterios=None, dados=None,
         if model.bus_kv.get(outro):                      # só linhas e trafos com barra física
             adj.append((r, outro))
 
+    # bancos série na linha ou nas adjacentes: estado físico próprio (inserido e bypass) e
+    # pontos de falta nos dois terminais do banco, antes e depois dele (C01)
+    barras_viz0 = {rele, remoto} | {o for _, o in adj}
+    bancos = [c for c in getattr(model, 'caps', []) if {c['bf'], c['bt']} & barras_viz0]
+    for c in bancos:
+        kc = (c['bf'], c['bt'], str(c.get('nc', '1')))
+        cen.append((f"bypass do banco {kc[0]}-{kc[1]}/{kc[2]}", [], [kc]))
+    pontos_banco = []
+    for c in bancos:
+        for lado in (c['bf'], c['bt']):
+            if lado != rele and model.bus_kv.get(lado) and lado != remoto:
+                pontos_banco.append((f"terminal {lado} do banco {c['bf']}-{c['bt']}", lado))
     medidas = {'barra remota': []}
+    for nome, _ in pontos_banco:
+        medidas.setdefault(nome, [])
     for r, outro in adj:
         medidas[f'fim de {r[0]}-{r[1]}/{r[2]}'] = []
     falhas = []
-    for rot, drop in cen:
+    for rot, drop, byp in cen:
         try:
-            S = S0 if not drop else _solver(model, drop, modo)
+            S = S0 if not (drop or byp) else _solver(model, drop, modo,
+                                                      bypass_capacitores=byp or None)
         except Exception as ex:
             falhas.append(f'{rot}: {type(ex).__name__}')
             continue
         pontos = [('barra remota', remoto)] + [(f'fim de {r[0]}-{r[1]}/{r[2]}', o)
                                                for r, o in adj
                                                if (r[0], r[1], r[2]) not in set(drop)]
+        pontos += pontos_banco
         for nome, fb in pontos:
             for k in kinds:
                 try:
@@ -3950,8 +4127,10 @@ def estudo_distancia(model, linha, terminal=None, criterios=None, dados=None,
         vals = [m for m in lista if m['Zproj'] is not None and m['Zproj'] > 0]
         return fn(vals, key=lambda m: m['Zproj']) if vals else None
 
-    adj_min = [extremo(v, min) for n, v in medidas.items() if n != 'barra remota']
-    adj_max = [extremo(v, max) for n, v in medidas.items() if n != 'barra remota']
+    adj_min = [extremo(v, min) for n, v in medidas.items() if n.startswith('fim de')]
+    adj_max = [extremo(v, max) for n, v in medidas.items() if n.startswith('fim de')]
+    banco_min = [extremo(v, min) for n, v in medidas.items() if n.startswith('terminal')]
+    banco_min = [x for x in banco_min if x]
     adj_min = [x for x in adj_min if x]
     adj_max = [x for x in adj_max if x]
     lim_z2_teto = min(adj_min, key=lambda m: m['Zproj']) if adj_min else None
@@ -3982,8 +4161,13 @@ def estudo_distancia(model, linha, terminal=None, criterios=None, dados=None,
     caps = [c for c in getattr(model, 'caps', []) if {c['bf'], c['bt']} & barras_viz]
     if caps:
         alertas.append(f'{len(caps)} capacitor(es) série na linha ou nas adjacentes: '
-                       f'sub e sobrealcance dependem do estado do banco e do MOV — '
-                       f'avaliar com inserção e bypass e com estudo transitório')
+                       f'avaliados com o banco inserido e em bypass; o comportamento do MOV '
+                       f'e a inversão de tensão exigem estudo transitório')
+        if banco_min:
+            m = min(banco_min, key=lambda x: x['Zproj'])
+            alertas.append(f"menor impedância aparente nos terminais de banco: "
+                           f"{m['Zproj']:.2f} Ω ({m['cenario']}, {m['falta']}) — "
+                           f"a zona 1 não pode alcançar esse ponto")
     mut = [m for m in model.mutuas
            if {m['bf1'], m['bt1']} == {bf, bt} or {m['bf2'], m['bt2']} == {bf, bt}]
     if mut:
@@ -4898,4 +5082,4 @@ sm211 = _types.SimpleNamespace(FUNCOES=FUNCOES, TEMPOS=TEMPOS, exige_stub=exige_
 dados_externos = _types.SimpleNamespace(CATALOGO=CATALOGO, EXIGIDOS=EXIGIDOS, RELATORIO=RELATORIO, da_base=da_base, faltantes=faltantes)
 fluxo = _types.SimpleNamespace(SEM_LIMITE=SEM_LIMITE, aplicar_despacho=aplicar_despacho, balanco=balanco, carga_maxima=carga_maxima, carregamento=carregamento, corrente_nominal=corrente_nominal, curto_por_cenario=curto_por_cenario, envelope_cenarios=envelope_cenarios, fluxos=fluxos, tensao_barra=tensao_barra)
 
-__all__ = ['# parsers     "AnaModel', 'PwfModel', 'conciliar_bases', 'ler_relatorio', 'niveis_kA', 'impedancias_pu', '# motor de curto-circuito     "Solver', 'branches_at', '# motor de proteção     "recomposicao_87b', 'envelope_contribuicoes', 'tabela_envelope', 'impacto_entrada', 'relatorio_curto', 'relatorio_protecao', 'ajuste_sobrecorrente', 'CRITERIOS_SOBRECORRENTE', 'estudo_barra', 'CRITERIOS_BARRA', 'SLOPE_87B_POR_FABRICANTE', 'estudo_distancia', 'para_secundario', '# motor de fluxo de potência     "fluxo', '# apoio     "curvas', 'tempo', 'tms_para_tempo', 'CURVAS', 'dados_externos', 'sm211', 'orientacao', 'SB', 'num', 'zfin', 'zn3']
+__all__ = ['# parsers     "AnaModel', 'PwfModel', 'conciliar_bases', 'ler_relatorio', 'niveis_kA', 'impedancias_pu', '# motor de curto-circuito     "Solver', 'branches_at', '# motor de proteção     "recomposicao_87b', 'envelope_contribuicoes', 'tabela_envelope', 'impacto_entrada', 'relatorio_curto', 'relatorio_protecao', 'ajuste_sobrecorrente', 'CRITERIOS_SOBRECORRENTE', 'estudo_barra', 'CRITERIOS_BARRA', 'SLOPE_87B_POR_FABRICANTE', 'estudo_distancia', 'para_secundario', 'estudo_87L', 'quantizar', '# motor de fluxo de potência     "fluxo', '# apoio     "curvas', 'tempo', 'tms_para_tempo', 'CURVAS', 'dados_externos', 'sm211', 'orientacao', 'SB', 'num', 'zfin', 'zn3']

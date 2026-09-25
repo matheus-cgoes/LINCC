@@ -109,7 +109,7 @@ def estudo_distancia(model, linha, terminal=None, criterios=None, dados=None,
         return None if z is None else abs(z) * np.cos(np.angle(z) - ang_l)
 
     # --- cenários: rede completa e N-1 em torno dos dois terminais ---
-    cen = [('rede completa', [])]
+    cen = [('rede completa', [], [])]
     if n1:
         vistos = set()
         for b in (rele, remoto):
@@ -118,7 +118,7 @@ def estudo_distancia(model, linha, terminal=None, criterios=None, dados=None,
                 if (bf, bt, nc) in eq or (bt, bf, nc) in eq or eq in vistos:
                     continue
                 vistos.add(eq)
-                cen.append((f'N-1 sem {r[0]}-{r[1]}/{r[2]}', list(eq)))
+                cen.append((f'N-1 sem {r[0]}-{r[1]}/{r[2]}', list(eq), []))
 
     # --- pontos de falta: barra remota e extremidade das linhas adjacentes ---
     adj, paralelos = [], []
@@ -132,19 +132,35 @@ def estudo_distancia(model, linha, terminal=None, criterios=None, dados=None,
         if model.bus_kv.get(outro):                      # só linhas e trafos com barra física
             adj.append((r, outro))
 
+    # bancos série na linha ou nas adjacentes: estado físico próprio (inserido e bypass) e
+    # pontos de falta nos dois terminais do banco, antes e depois dele (C01)
+    barras_viz0 = {rele, remoto} | {o for _, o in adj}
+    bancos = [c for c in getattr(model, 'caps', []) if {c['bf'], c['bt']} & barras_viz0]
+    for c in bancos:
+        kc = (c['bf'], c['bt'], str(c.get('nc', '1')))
+        cen.append((f"bypass do banco {kc[0]}-{kc[1]}/{kc[2]}", [], [kc]))
+    pontos_banco = []
+    for c in bancos:
+        for lado in (c['bf'], c['bt']):
+            if lado != rele and model.bus_kv.get(lado) and lado != remoto:
+                pontos_banco.append((f"terminal {lado} do banco {c['bf']}-{c['bt']}", lado))
     medidas = {'barra remota': []}
+    for nome, _ in pontos_banco:
+        medidas.setdefault(nome, [])
     for r, outro in adj:
         medidas[f'fim de {r[0]}-{r[1]}/{r[2]}'] = []
     falhas = []
-    for rot, drop in cen:
+    for rot, drop, byp in cen:
         try:
-            S = S0 if not drop else _solver(model, drop, modo)
+            S = S0 if not (drop or byp) else _solver(model, drop, modo,
+                                                      bypass_capacitores=byp or None)
         except Exception as ex:
             falhas.append(f'{rot}: {type(ex).__name__}')
             continue
         pontos = [('barra remota', remoto)] + [(f'fim de {r[0]}-{r[1]}/{r[2]}', o)
                                                for r, o in adj
                                                if (r[0], r[1], r[2]) not in set(drop)]
+        pontos += pontos_banco
         for nome, fb in pontos:
             for k in kinds:
                 try:
@@ -167,8 +183,10 @@ def estudo_distancia(model, linha, terminal=None, criterios=None, dados=None,
         vals = [m for m in lista if m['Zproj'] is not None and m['Zproj'] > 0]
         return fn(vals, key=lambda m: m['Zproj']) if vals else None
 
-    adj_min = [extremo(v, min) for n, v in medidas.items() if n != 'barra remota']
-    adj_max = [extremo(v, max) for n, v in medidas.items() if n != 'barra remota']
+    adj_min = [extremo(v, min) for n, v in medidas.items() if n.startswith('fim de')]
+    adj_max = [extremo(v, max) for n, v in medidas.items() if n.startswith('fim de')]
+    banco_min = [extremo(v, min) for n, v in medidas.items() if n.startswith('terminal')]
+    banco_min = [x for x in banco_min if x]
     adj_min = [x for x in adj_min if x]
     adj_max = [x for x in adj_max if x]
     lim_z2_teto = min(adj_min, key=lambda m: m['Zproj']) if adj_min else None
@@ -199,8 +217,13 @@ def estudo_distancia(model, linha, terminal=None, criterios=None, dados=None,
     caps = [c for c in getattr(model, 'caps', []) if {c['bf'], c['bt']} & barras_viz]
     if caps:
         alertas.append(f'{len(caps)} capacitor(es) série na linha ou nas adjacentes: '
-                       f'sub e sobrealcance dependem do estado do banco e do MOV — '
-                       f'avaliar com inserção e bypass e com estudo transitório')
+                       f'avaliados com o banco inserido e em bypass; o comportamento do MOV '
+                       f'e a inversão de tensão exigem estudo transitório')
+        if banco_min:
+            m = min(banco_min, key=lambda x: x['Zproj'])
+            alertas.append(f"menor impedância aparente nos terminais de banco: "
+                           f"{m['Zproj']:.2f} Ω ({m['cenario']}, {m['falta']}) — "
+                           f"a zona 1 não pode alcançar esse ponto")
     mut = [m for m in model.mutuas
            if {m['bf1'], m['bt1']} == {bf, bt} or {m['bf2'], m['bt2']} == {bf, bt}]
     if mut:

@@ -95,6 +95,10 @@ em rede normal e em contingência, e os limites que cada zona precisa respeitar 
 linha sem alcançar além das adjacentes. Circuito paralelo, acoplamento mútuo e capacitor
 série vêm sinalizados. Se você informar os alcances, o relatório traz as margens.
 
+**Diferencial de linha**: faixa do ajuste entre a corrente capacitiva da linha e a menor
+falta interna, com a maior corrente passante para falta externa como referência de
+estabilidade.
+
 **Envelope por vão** de uma subestação: maior e menor corrente de fase e de terra em cada
 vão, varrendo os quatro tipos de defeito, sistema completo e contingência simples, retirada
 de equipamento e terminal remoto aberto — com o cenário em que cada extremo ocorreu.

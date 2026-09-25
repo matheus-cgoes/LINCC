@@ -116,6 +116,36 @@ Com os alcances informados no pedido, o resultado traz a margem de cada zona e a
 ao secundário (relações de TC e TP). A comparação é por módulo na direção da linha; a região
 real depende da característica do IED, que não está modelada.
 
+## Diferencial de linha (87L)
+
+| Limite | Cálculo |
+|---|---|
+| Inferior | corrente capacitiva da linha na tensão máxima de operação (padrão 1,05 pu), ou o piso de medição do TC, o que for maior |
+| Superior | menor corrente diferencial para falta interna, varrida ao longo da linha em rede completa e N-1 |
+| Estabilidade | maior corrente passante para falta externa nas duas barras |
+
+A relação de sensibilidade e a margem sobre a capacitiva são critérios do usuário. A
+característica percentual, a compensação de corrente capacitiva e o canal de comunicação do
+IED não estão modelados.
+
+## Bancos série na distância
+
+Cada capacitor série na linha ou nas adjacentes é avaliado inserido e em bypass, com pontos
+de falta nos dois terminais do banco. O comportamento do MOV e a inversão de tensão exigem
+estudo transitório.
+
+## 51V: controle e restrição
+
+São avaliados como objetos distintos. No controle, a tensão habilita um pickup reduzido
+fixo; na restrição, o pickup varia com a tensão — aqui pela forma linear genérica, e pela
+curva do IED quando o perfil do fabricante estiver registrado.
+
+## Quantização
+
+Com o passo de ajuste do relé informado, o valor é arredondado sem sair da faixa
+admissível; se nenhum arredondamento couber, o resultado diz que a faixa não comporta o
+passo.
+
 ## Critérios do usuário e exportação
 
 Os critérios de filosofia do agente — múltiplos de carga, escalas entre funções, margens —
