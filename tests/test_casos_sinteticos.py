@@ -840,3 +840,38 @@ def test_resultados_trazem_estado_e_limitacao_de_sequencia_negativa():
     e = estudo_barra(M, 2)
     assert e["funcoes"]["slope"]["estado"] == "modelo_nao_suportado"
     assert "falhas" in e
+
+
+# ---------- proteção de distância ----------
+
+def test_distancia_lacos_medem_a_linha_para_falta_na_barra_remota():
+    """Falta na barra remota: todos os laços, com k0 complexo, medem Z1L."""
+    from lincc import estudo_distancia
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    r = estudo_distancia(M, (1, 2, "1"), modo="sincronas")
+    z1 = abs(r["Z1L_ohm"])
+    for m in r["medidas"]["barra remota"]:
+        assert abs(m["Z"]) == pytest.approx(z1, rel=1e-6), (m["falta"], m["laco"])
+    br = next(b for b in M.branches if (b["bf"], b["bt"]) == (1, 2))
+    assert r["k0"] == pytest.approx((complex(br["R0"], br["X0"]) - complex(br["R1"], br["X1"]))
+                                    / (3 * complex(br["R1"], br["X1"])))
+    assert not r["exportacao"]["exportavel"] and r["premissas"]
+    assert "alcances das zonas (critério do usuário)" in r["faltantes"]
+
+
+def test_distancia_margens_com_alcances_informados():
+    from lincc import estudo_distancia
+    M = AnaModel(str(CASES / "caso1_radial.ANA"))
+    r = estudo_distancia(M, (1, 2, "1"), criterios={"Z1": 1.1, "Z2": 0.9}, modo="sincronas")
+    assert "zona 1 alcança a barra remota ou além" in r["zonas"]["Z1"]["alertas"]
+    assert "zona 2 não cobre a linha inteira" in r["zonas"]["Z2"]["alertas"]
+    assert r["zonas"]["Z1"]["estado"] == "faixa_inviavel"
+
+
+def test_conversao_ao_secundario():
+    from lincc import para_secundario
+    assert para_secundario(3000.0, "corrente", rtc=3000) == pytest.approx(1.0)
+    assert para_secundario(500.0, "tensao", rtp=500e3 / 115) == pytest.approx(115.0)
+    assert para_secundario(10.0, "impedancia", rtc=3000, rtp=500e3 / 115) == \
+        pytest.approx(10.0 * 3000 / (500e3 / 115))
+    assert para_secundario(10.0, "impedancia", rtc=3000) is None     # sem TP, não exporta

@@ -93,6 +93,29 @@ prevê a detecção por corrente ou pelo sinal de disparo remanescente, e o redi
 GE MiCOM P74x (barra) e os tempos de redisparo e de falha de disjuntor. Os tempos seguem o
 limite de 250 ms do Submódulo 2.11 até a revisão específica.
 
+## Distância (21/21N)
+
+O LINCC não aprova alcance percentual. Mede a impedância aparente vista pelo relé, laço a
+laço, em rede completa e em contingência simples em torno dos dois terminais, e devolve os
+limites que qualquer ajuste precisa respeitar:
+
+| Zona | Limite calculado |
+|---|---|
+| 1 | abaixo da impedância da linha |
+| 2 | acima da impedância da linha e abaixo da menor impedância aparente para falta no fim das linhas adjacentes, com infeed |
+| 3 | referência de retaguarda: maior impedância aparente para falta no fim das adjacentes |
+| Carga | menor impedância de carga, pela capacidade de emergência e tensão mínima |
+
+Laços: AG para monofásica, BC para bifásica, BC/BG/CG para bifásica-terra, AB para
+trifásica. Compensação residual com k0 complexo; Kr e Kx são informados à parte, porque não
+são as partes de k0. Circuito paralelo e acoplamento mútuo são sinalizados, e o fim do
+paralelo — a própria barra local — não entra como falta adjacente. Capacitor série na linha
+ou nas adjacentes gera alerta para avaliação com inserção, bypass e estudo transitório.
+
+Com os alcances informados no pedido, o resultado traz a margem de cada zona e a conversão
+ao secundário (relações de TC e TP). A comparação é por módulo na direção da linha; a região
+real depende da característica do IED, que não está modelada.
+
 ## Critérios do usuário e exportação
 
 Os critérios de filosofia do agente — múltiplos de carga, escalas entre funções, margens —

@@ -124,6 +124,8 @@ lincc.sm211.* e lincc.dados_externos.*. Requer apenas numpy e scipy.
         corpo((PKG / "solver.py").read_text(encoding="utf-8")),
         "\n\n# ===================== motor de protecao =====================\n",
         corpo((PKG / "protecao.py").read_text(encoding="utf-8")),
+        "\n\n# ===================== protecao de distancia =====================\n",
+        corpo((PKG / "distancia.py").read_text(encoding="utf-8")),
         "\n\n# ===================== motor de fluxo de potencia =====================\n",
         corpo((PKG / "fluxo.py").read_text(encoding="utf-8")),
         "\n\n# ===================== curvas de tempo inverso =====================\n",

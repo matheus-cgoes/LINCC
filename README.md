@@ -90,6 +90,11 @@ morta, com a menor corrente de curto buscada entre rede normal, contingências, 
 da barra por cada alimentação e cenários de operação. Os critérios usados vêm declarados, e
 quando a faixa de ajuste não existe, o relatório diz qual critério prevaleceu e por quê.
 
+**Estudo de distância** de um terminal de linha: impedância vista pelo relé em cada laço,
+em rede normal e em contingência, e os limites que cada zona precisa respeitar para cobrir a
+linha sem alcançar além das adjacentes. Circuito paralelo, acoplamento mútuo e capacitor
+série vêm sinalizados. Se você informar os alcances, o relatório traz as margens.
+
 **Envelope por vão** de uma subestação: maior e menor corrente de fase e de terra em cada
 vão, varrendo os quatro tipos de defeito, sistema completo e contingência simples, retirada
 de equipamento e terminal remoto aberto — com o cenário em que cada extremo ocorreu.
